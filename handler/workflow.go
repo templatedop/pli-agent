@@ -7,164 +7,121 @@ import (
 
 	"pli-agent-api/core/port"
 	resp "pli-agent-api/handler/response"
+	repo "pli-agent-api/repo/postgres"
 
 	log "gitlab.cept.gov.in/it-2.0-common/n-api-log"
 	serverHandler "gitlab.cept.gov.in/it-2.0-common/n-api-server/handler"
 	serverRoute "gitlab.cept.gov.in/it-2.0-common/n-api-server/route"
 )
 
-// AgentWorkflowHandler handles all workflow and session management APIs
-// AGT-016 to AGT-021: Workflow, Status, and Notification APIs
+// AgentWorkflowHandler handles agent status and notification APIs
+// AGT-020 to AGT-021: Status and Notification APIs
+// NOTE: Session management APIs (AGT-016 to AGT-019) moved to Phase 5 with Temporal WF-002
 type AgentWorkflowHandler struct {
 	*serverHandler.Base
-	// TODO: Add Temporal client when implementing workflows
+	profileRepo *repo.AgentProfileRepository
+	// TODO: Add Temporal client when implementing WF-002 in Phase 5
 	// temporalClient client.Client
+	// TODO: Add notification service client for INT-AGT-005
+	// notificationClient NotificationService
 }
 
 // NewAgentWorkflowHandler creates a new workflow handler
-func NewAgentWorkflowHandler() *AgentWorkflowHandler {
-	base := serverHandler.New("Agent Workflow APIs").SetPrefix("/v1").AddPrefix("")
+func NewAgentWorkflowHandler(profileRepo *repo.AgentProfileRepository) *AgentWorkflowHandler {
+	base := serverHandler.New("Agent Status & Notification APIs").SetPrefix("/v1").AddPrefix("")
 	return &AgentWorkflowHandler{
-		Base: base,
+		Base:        base,
+		profileRepo: profileRepo,
 	}
 }
 
-// Routes defines all workflow API routes
+// Routes defines status and notification API routes
+// NOTE: Session management routes (AGT-016 to AGT-019) will be implemented in Phase 5
+// with Temporal WF-002: Agent Onboarding Workflow
 func (h *AgentWorkflowHandler) Routes() []serverRoute.Route {
 	return []serverRoute.Route{
-		serverRoute.GET("/agent-profiles/sessions/:session_id/status", h.GetSessionStatus).Name("Get Session Status"),
-		serverRoute.POST("/agent-profiles/sessions/:session_id/save", h.SaveSession).Name("Save Session Checkpoint"),
-		serverRoute.GET("/agent-profiles/sessions/:session_id/resume", h.ResumeSession).Name("Resume Session"),
-		serverRoute.DELETE("/agent-profiles/sessions/:session_id", h.CancelSession).Name("Cancel Session"),
-		serverRoute.GET("/agent-profiles/creation-status/:agent_id", h.GetCreationStatus).Name("Get Creation Status"),
+		// AGT-020: Get Agent Creation Status (Connected to Repository)
+		serverRoute.GET("/agent-profiles/creation-status/:agent_id", h.GetCreationStatus).Name("Get Agent Creation Status"),
+
+		// AGT-021: Resend Welcome Notification (Mock - needs INT-AGT-005)
 		serverRoute.POST("/agents/:agent_id/notifications/resend-welcome", h.ResendWelcomeNotification).Name("Resend Welcome Notification"),
+
+		// TODO: Phase 5 - Session Management APIs (with Temporal WF-002)
+		// AGT-016: GET /agent-profiles/sessions/:session_id/status
+		// AGT-017: POST /agent-profiles/sessions/:session_id/save
+		// AGT-018: GET /agent-profiles/sessions/:session_id/resume
+		// AGT-019: DELETE /agent-profiles/sessions/:session_id
 	}
-}
-
-// GetSessionStatus returns profile creation session status
-// AGT-016: Get Session Status
-// WF-AGT-PRF-001: Profile Creation Workflow
-func (h *AgentWorkflowHandler) GetSessionStatus(sctx *serverRoute.Context, req SessionIDUri) (*resp.SessionStatusResponse, error) {
-	log.Info(sctx.Ctx, "Fetching session status for session ID: %s", req.SessionID)
-
-	// TODO: WF-AGT-PRF-001 - Query session from Temporal workflow or database
-	// For now, return mock response
-
-	now := time.Now()
-	workflowState := &resp.WorkflowState{
-		CurrentStep:        "PROFILE_DETAILS",
-		NextStep:           "ADDRESS_DETAILS",
-		AllowedActions:     []string{"SAVE", "SUBMIT", "CANCEL"},
-		ProgressPercentage: 40,
-	}
-
-	return &resp.SessionStatusResponse{
-		StatusCodeAndMessage: port.FetchSuccess,
-		SessionID:            req.SessionID,
-		Status:               "ACTIVE",
-		WorkflowState:        workflowState,
-		LastSavedAt:          &now,
-	}, nil
-}
-
-// SaveSession saves profile creation session checkpoint
-// AGT-017: Save Session Checkpoint
-// WF-AGT-PRF-001: Profile Creation Workflow
-func (h *AgentWorkflowHandler) SaveSession(sctx *serverRoute.Context, req SaveSessionRequest) (*resp.SaveSessionResponse, error) {
-	log.Info(sctx.Ctx, "Saving session checkpoint for session ID: %s, screen: %s", req.SessionID, req.CurrentScreen)
-
-	// TODO: WF-AGT-PRF-001 - Save session data to Temporal workflow or database
-	// For now, return mock response
-
-	expiresAt := time.Now().Add(24 * time.Hour) // 24 hour expiry
-
-	return &resp.SaveSessionResponse{
-		StatusCodeAndMessage: port.CustomEnv.WithMessage("Session saved successfully"),
-		Saved:                true,
-		SessionExpiresAt:     &expiresAt,
-	}, nil
-}
-
-// ResumeSession retrieves saved session data
-// AGT-018: Resume Session
-// WF-AGT-PRF-001: Profile Creation Workflow
-func (h *AgentWorkflowHandler) ResumeSession(sctx *serverRoute.Context, req SessionIDUri) (*resp.ResumeSessionResponse, error) {
-	log.Info(sctx.Ctx, "Resuming session for session ID: %s", req.SessionID)
-
-	// TODO: WF-AGT-PRF-001 - Retrieve session data from Temporal workflow or database
-	// For now, return mock response
-
-	formData := map[string]interface{}{
-		"first_name":   "Rajesh",
-		"last_name":    "Kumar",
-		"date_of_birth": "1985-05-15",
-		"email":        "rajesh.kumar@example.com",
-		"mobile":       "9876543210",
-	}
-
-	workflowState := &resp.WorkflowState{
-		CurrentStep:        "PROFILE_DETAILS",
-		NextStep:           "ADDRESS_DETAILS",
-		AllowedActions:     []string{"SAVE", "SUBMIT", "CANCEL"},
-		ProgressPercentage: 40,
-	}
-
-	return &resp.ResumeSessionResponse{
-		StatusCodeAndMessage: port.FetchSuccess,
-		SessionID:            req.SessionID,
-		AgentType:            "ADVISOR",
-		FormData:             formData,
-		WorkflowState:        workflowState,
-	}, nil
-}
-
-// CancelSession cancels profile creation session
-// AGT-019: Cancel Session
-// WF-AGT-PRF-001: Profile Creation Workflow
-func (h *AgentWorkflowHandler) CancelSession(sctx *serverRoute.Context, req SessionIDUri) (*resp.CancelSessionResponse, error) {
-	log.Info(sctx.Ctx, "Cancelling session for session ID: %s", req.SessionID)
-
-	// TODO: WF-AGT-PRF-001 - Cancel Temporal workflow and cleanup session data
-	// For now, return mock response
-
-	return &resp.CancelSessionResponse{
-		StatusCodeAndMessage: port.CustomEnv.WithMessage("Session cancelled successfully"),
-		Cancelled:            true,
-		Message:              "Profile creation session has been cancelled",
-	}, nil
 }
 
 // GetCreationStatus returns agent creation status
 // AGT-020: Get Creation Status
 // FR-AGT-PRF-009: Agent Profile Status Tracking
+// FIXED: Now connects to AgentProfileRepository for real data
 func (h *AgentWorkflowHandler) GetCreationStatus(sctx *serverRoute.Context, req AgentIDUri) (*resp.CreationStatusResponse, error) {
 	log.Info(sctx.Ctx, "Fetching creation status for agent ID: %s", req.AgentID)
 
-	// TODO: Query agent profile and workflow status
-	// For now, return mock response
-
-	verificationStatus := &resp.VerificationStatus{
-		PANVerified:    true,
-		HRMSVerified:   true,
-		OfficeVerified: false,
+	// Query actual agent profile from repository
+	profile, err := h.profileRepo.FindByID(sctx.Ctx, req.AgentID)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error fetching agent profile: %v", err)
+		return nil, err
 	}
 
-	nextAction := resp.NextActionDue{
-		Action:  "Complete Office Verification",
-		DueDate: nil,
+	// Build verification status from actual profile data
+	verificationStatus := &resp.VerificationStatus{
+		PANVerified:    profile.PANNumber != "",
+		HRMSVerified:   profile.EmployeeID.Valid && profile.EmployeeID.String != "",
+		OfficeVerified: profile.OfficeCode != "",
+	}
+
+	// Calculate SLA tracking based on creation time
+	timeElapsed := time.Since(profile.CreatedAt)
+	slaStatus := "GREEN"
+	if timeElapsed > 24*time.Hour {
+		slaStatus = "RED"
+	} else if timeElapsed > 4*time.Hour {
+		slaStatus = "YELLOW"
+	}
+
+	// Determine next actions based on verification status
+	nextActions := []resp.NextActionDue{}
+	if !verificationStatus.PANVerified {
+		nextActions = append(nextActions, resp.NextActionDue{
+			Action:  "Complete PAN Verification",
+			DueDate: nil,
+		})
+	}
+	if !verificationStatus.HRMSVerified {
+		nextActions = append(nextActions, resp.NextActionDue{
+			Action:  "Complete HRMS Verification",
+			DueDate: nil,
+		})
+	}
+	if !verificationStatus.OfficeVerified {
+		nextActions = append(nextActions, resp.NextActionDue{
+			Action:  "Complete Office Verification",
+			DueDate: nil,
+		})
 	}
 
 	slaTracking := &resp.SLATracking{
-		SLAStatus:          "YELLOW",
-		TimeElapsedMinutes: 45,
-		NextActionsDue:     []resp.NextActionDue{nextAction},
+		SLAStatus:          slaStatus,
+		TimeElapsedMinutes: int(timeElapsed.Minutes()),
+		NextActionsDue:     nextActions,
+	}
+
+	// Determine current stage based on status and workflow state
+	currentStage := "CREATED"
+	if profile.WorkflowState.Valid && profile.WorkflowState.String != "" {
+		currentStage = profile.WorkflowState.String
 	}
 
 	return &resp.CreationStatusResponse{
 		StatusCodeAndMessage: port.FetchSuccess,
-		AgentID:              req.AgentID,
-		Status:               "IN_PROGRESS",
-		CurrentStage:         "VERIFICATION",
+		AgentID:              profile.AgentID,
+		Status:               profile.Status,
+		CurrentStage:         currentStage,
 		VerificationStatus:   verificationStatus,
 		SLATracking:          slaTracking,
 	}, nil
@@ -173,11 +130,36 @@ func (h *AgentWorkflowHandler) GetCreationStatus(sctx *serverRoute.Context, req 
 // ResendWelcomeNotification resends welcome notification to agent
 // AGT-021: Resend Welcome Notification
 // INT-AGT-005: Notification Service Integration
+//
+// MOCK IMPLEMENTATION: This is a mock response for development/testing.
+//
+// Production Requirements:
+// 1. Inject notification service client (email + SMS gateway)
+// 2. Query agent profile for contact details (email, mobile)
+// 3. Call notification service with welcome template
+// 4. Store notification log in database
+// 5. Handle failures and retries
+//
+// Integration Points:
+// - Email Service: SMTP or third-party (SendGrid, AWS SES)
+// - SMS Service: Third-party gateway (Twilio, AWS SNS)
+// - Template Service: For welcome message templates
 func (h *AgentWorkflowHandler) ResendWelcomeNotification(sctx *serverRoute.Context, req ResendWelcomeNotificationRequest) (*resp.WelcomeNotificationResponse, error) {
 	log.Info(sctx.Ctx, "Resending welcome notification for agent ID: %s", req.AgentID)
 
-	// TODO: INT-AGT-005 - Call notification service to send email and SMS
-	// For now, return mock response
+	// Verify agent exists
+	profile, err := h.profileRepo.FindByID(sctx.Ctx, req.AgentID)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error fetching agent profile: %v", err)
+		return nil, err
+	}
+
+	log.Info(sctx.Ctx, "Agent found: %s %s, Status: %s", profile.FirstName, profile.LastName, profile.Status)
+
+	// TODO: INT-AGT-005 - Call notification service
+	// Example production code:
+	// err = h.notificationClient.SendWelcomeEmail(profile.Email, profile.FirstName)
+	// err = h.notificationClient.SendWelcomeSMS(profile.Mobile, profile.FirstName)
 
 	// Default channels if not specified
 	channels := req.Channels
@@ -185,11 +167,14 @@ func (h *AgentWorkflowHandler) ResendWelcomeNotification(sctx *serverRoute.Conte
 		channels = []string{"EMAIL", "SMS"}
 	}
 
+	// Mock response - in production, this should be the actual notification ID from service
 	notificationID := uuid.New().String()
 	sentAt := time.Now()
 
+	log.Info(sctx.Ctx, "Welcome notification mock sent to agent %s via channels: %v", req.AgentID, channels)
+
 	return &resp.WelcomeNotificationResponse{
-		StatusCodeAndMessage: port.CustomEnv.WithMessage("Welcome notification sent successfully"),
+		StatusCodeAndMessage: port.CustomEnv.WithMessage("Welcome notification sent successfully (mock)"),
 		NotificationID:       notificationID,
 		ChannelsSent:         channels,
 		SentAt:               &sentAt,
