@@ -980,7 +980,9 @@ func (r *AgentProfileRepository) CreateApprovalRequestWithChanges(
 
 	} else {
 		// Case 2: Direct update based on section
+		// CRITICAL: Single database round trip for all section types
 		var profile domain.AgentProfile
+		var updatedVersion int
 
 		switch section {
 		case "personal_info":
@@ -1022,24 +1024,117 @@ func (r *AgentProfileRepository) CreateApprovalRequestWithChanges(
 			}
 
 		case "address":
-			// TODO: Implement address update
-			return nil, nil, fmt.Errorf("address update not implemented yet")
+			// Extract address_id and update fields from changes
+			addressID, ok := changes["address_id"].(string)
+			if !ok || addressID == "" {
+				return nil, nil, fmt.Errorf("address_id is required for address updates")
+			}
+
+			// Extract update map from changes (excluding address_id)
+			updateMap := make(map[string]interface{})
+			for field, changeObj := range changes {
+				if field == "address_id" {
+					continue // Skip the ID field
+				}
+				if change, ok := changeObj.(map[string]interface{}); ok {
+					if newValue, exists := change["new_value"]; exists {
+						updateMap[field] = newValue
+					}
+				} else {
+					// If not in change object format, use directly
+					updateMap[field] = changeObj
+				}
+			}
+
+			// Build dynamic UPDATE query for address with Squirrel
+			updateQuery := dblib.Psql.Update("agent_addresses").
+				Set("updated_at", time.Now()).
+				Set("updated_by", requestedBy).
+				Set("version", sq.Expr("version + 1")).
+				Where(sq.And{
+					sq.Eq{"address_id": addressID},
+					sq.Eq{"agent_id": agentID},
+					sq.Eq{"deleted_at": nil},
+				})
+
+			// Add dynamic fields from updates map
+			for field, value := range updateMap {
+				updateQuery = updateQuery.Set(field, value)
+			}
+
+			// Add RETURNING clause for version
+			updateQuery = updateQuery.Suffix("RETURNING version")
+
+			// Queue the update query
+			err := dbutil.QueueReturnRow(batch, updateQuery, pgx.RowTo[int], &updatedVersion)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to queue address update: %w", err)
+			}
 
 		case "contact":
-			// TODO: Implement contact update
-			return nil, nil, fmt.Errorf("contact update not implemented yet")
+			// Extract contact_id and update fields from changes
+			contactID, ok := changes["contact_id"].(string)
+			if !ok || contactID == "" {
+				return nil, nil, fmt.Errorf("contact_id is required for contact updates")
+			}
+
+			// Extract update map from changes (excluding contact_id)
+			updateMap := make(map[string]interface{})
+			for field, changeObj := range changes {
+				if field == "contact_id" {
+					continue // Skip the ID field
+				}
+				if change, ok := changeObj.(map[string]interface{}); ok {
+					if newValue, exists := change["new_value"]; exists {
+						updateMap[field] = newValue
+					}
+				} else {
+					// If not in change object format, use directly
+					updateMap[field] = changeObj
+				}
+			}
+
+			// Build dynamic UPDATE query for contact with Squirrel
+			updateQuery := dblib.Psql.Update("agent_contacts").
+				Set("updated_at", time.Now()).
+				Set("updated_by", requestedBy).
+				Set("version", sq.Expr("version + 1")).
+				Where(sq.And{
+					sq.Eq{"contact_id": contactID},
+					sq.Eq{"agent_id": agentID},
+					sq.Eq{"deleted_at": nil},
+				})
+
+			// Add dynamic fields from updates map
+			for field, value := range updateMap {
+				updateQuery = updateQuery.Set(field, value)
+			}
+
+			// Add RETURNING clause for version
+			updateQuery = updateQuery.Suffix("RETURNING version")
+
+			// Queue the update query
+			err := dbutil.QueueReturnRow(batch, updateQuery, pgx.RowTo[int], &updatedVersion)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to queue contact update: %w", err)
+			}
 
 		default:
 			return nil, nil, fmt.Errorf("unsupported section: %s", section)
 		}
 
-		// Execute batch
+		// Execute batch - single database round trip for all section types
 		err := r.db.SendBatch(cCtx, batch).Close()
 		if err != nil {
 			if err == pgx.ErrNoRows {
-				return nil, nil, fmt.Errorf("agent not found: %s", agentID)
+				return nil, nil, fmt.Errorf("entity not found for section %s", section)
 			}
-			return nil, nil, fmt.Errorf("failed to update profile: %w", err)
+			return nil, nil, fmt.Errorf("failed to update %s: %w", section, err)
+		}
+
+		// For address/contact sections, set the version from the returned value
+		if section == "address" || section == "contact" {
+			profile.Version = updatedVersion
 		}
 
 		return nil, &profile, nil
