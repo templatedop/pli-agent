@@ -115,6 +115,8 @@ var FxTemporal = fx.Module(
 			w.RegisterWorkflow(workflows.AgentApprovalWorkflow)
 
 			// Register all activities for WF-002
+			// RecordWorkflowStartActivity (FIRST activity - makes workflow self-recording)
+			w.RegisterActivity(activities.RecordWorkflowStartActivity)
 			// ACT-011: ValidateAgentTypeActivity
 			w.RegisterActivity(activities.ValidateAgentTypeActivity)
 			// ACT-012: ValidateProfileDataActivity

@@ -23,6 +23,7 @@ type AgentOnboardingActivities struct {
 	emailRepo   *repo.AgentEmailRepository
 	licenseRepo *repo.AgentLicenseRepository
 	auditRepo   *repo.AgentAuditLogRepository
+	sessionRepo *repo.AgentProfileSessionRepository // For workflow self-recording
 }
 
 // NewAgentOnboardingActivities creates a new AgentOnboardingActivities instance
@@ -33,6 +34,7 @@ func NewAgentOnboardingActivities(
 	emailRepo *repo.AgentEmailRepository,
 	licenseRepo *repo.AgentLicenseRepository,
 	auditRepo *repo.AgentAuditLogRepository,
+	sessionRepo *repo.AgentProfileSessionRepository,
 ) *AgentOnboardingActivities {
 	return &AgentOnboardingActivities{
 		profileRepo: profileRepo,
@@ -41,6 +43,7 @@ func NewAgentOnboardingActivities(
 		emailRepo:   emailRepo,
 		licenseRepo: licenseRepo,
 		auditRepo:   auditRepo,
+		sessionRepo: sessionRepo,
 	}
 }
 
@@ -121,6 +124,69 @@ type HRMSData struct {
 	OfficeCode    string
 	Designation   string
 	ServiceNumber string
+}
+
+// ==================== RecordWorkflowStartActivity ====================
+// This activity is called as the FIRST activity in the workflow
+// It records the workflow start in the database
+// CRITICAL: This ensures the workflow is self-recording and self-healing
+// If the database update fails, Temporal will retry this activity
+// The workflow doesn't proceed until the database knows about it
+
+type RecordWorkflowStartInput struct {
+	SessionID     string
+	WorkflowID    string
+	RunID         string
+	WorkflowState string
+	CurrentStep   string
+	NextStep      string
+	Progress      int
+	SubmittedBy   string
+}
+
+type RecordWorkflowStartOutput struct {
+	Recorded bool
+	Message  string
+}
+
+// RecordWorkflowStartActivity records workflow start in database
+// This is the FIRST activity called by the workflow
+// Ensures atomicity: Either database knows about workflow OR workflow fails
+func (a *AgentOnboardingActivities) RecordWorkflowStartActivity(ctx context.Context, input RecordWorkflowStartInput) (*RecordWorkflowStartOutput, error) {
+	logger := activity.GetLogger(ctx)
+	logger.Info("RecordWorkflowStartActivity started",
+		"SessionID", input.SessionID,
+		"WorkflowID", input.WorkflowID,
+		"RunID", input.RunID)
+
+	activity.RecordHeartbeat(ctx, "Recording workflow start in database")
+
+	// ATOMIC: Link Temporal workflow + update state in single database round trip
+	// This is the CRITICAL operation that makes the workflow self-recording
+	// If this fails, Temporal will retry this activity
+	// The workflow doesn't proceed until this succeeds
+	_, err := a.sessionRepo.LinkTemporalWorkflowAndUpdateStateReturning(
+		ctx,
+		input.SessionID,
+		input.WorkflowID,
+		input.RunID,
+		input.WorkflowState,
+		input.CurrentStep,
+		input.NextStep,
+		input.Progress,
+		input.SubmittedBy,
+	)
+	if err != nil {
+		logger.Error("Failed to record workflow start in database", "error", err)
+		return nil, fmt.Errorf("failed to record workflow start: %w", err)
+	}
+
+	logger.Info("Workflow start recorded successfully in database", "SessionID", input.SessionID)
+
+	return &RecordWorkflowStartOutput{
+		Recorded: true,
+		Message:  "Workflow start recorded in database",
+	}, nil
 }
 
 // ==================== ACT-011: ValidateAgentTypeActivity ====================

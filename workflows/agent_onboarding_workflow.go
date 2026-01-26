@@ -45,6 +45,31 @@ func AgentOnboardingWorkflow(ctx workflow.Context, input activities.OnboardingIn
 	// Activity instance for executing activities
 	var a *activities.AgentOnboardingActivities
 
+	// Step 0: Record Workflow Start in Database (FIRST ACTIVITY - CRITICAL)
+	// This makes the workflow self-recording and self-healing
+	// If this fails, Temporal will retry it
+	// The workflow doesn't proceed until the database knows about it
+	logger.Info("Step 0: Recording workflow start in database")
+	workflowInfo := workflow.GetInfo(ctx)
+	var recordStartResult activities.RecordWorkflowStartOutput
+	err := workflow.ExecuteActivity(ctx, a.RecordWorkflowStartActivity, activities.RecordWorkflowStartInput{
+		SessionID:     input.SessionID,
+		WorkflowID:    workflowInfo.WorkflowExecution.ID,
+		RunID:         workflowInfo.WorkflowExecution.RunID,
+		WorkflowState: domain.WorkflowStateProfileSubmitting,
+		CurrentStep:   "PROFILE_SUBMITTED",
+		NextStep:      "VALIDATION",
+		Progress:      10,
+		SubmittedBy:   input.SubmittedBy,
+	}).Get(ctx, &recordStartResult)
+	if err != nil {
+		logger.Error("Failed to record workflow start in database", "error", err)
+		// This is CRITICAL - if we can't record the workflow start, we should fail
+		// Temporal will retry this activity automatically
+		return nil, fmt.Errorf("failed to record workflow start: %w", err)
+	}
+	logger.Info("Workflow start recorded in database successfully")
+
 	// Step 1: Validate Agent Type and Profile Data
 	logger.Info("Step 1: Validating agent type and profile data")
 	var validateTypeResult activities.ValidateAgentTypeOutput
@@ -140,7 +165,7 @@ func AgentOnboardingWorkflow(ctx workflow.Context, input activities.OnboardingIn
 						if s, ok := v.(string); ok {
 							input.ProfileData.MobileNumber = s
 						}
-					// Add more fields as needed
+						// Add more fields as needed
 					}
 				}
 			} else {
@@ -381,11 +406,11 @@ func AgentOnboardingWorkflow(ctx workflow.Context, input activities.OnboardingIn
 
 	// Send welcome email
 	err = workflow.ExecuteActivity(ctx, a.SendWelcomeEmailActivity, activities.SendWelcomeEmailInput{
-		AgentID:     agentID,
-		AgentCode:   agentCode,
-		Email:       input.ProfileData.Email,
-		FirstName:   input.ProfileData.FirstName,
-		LastName:    input.ProfileData.LastName,
+		AgentID:   agentID,
+		AgentCode: agentCode,
+		Email:     input.ProfileData.Email,
+		FirstName: input.ProfileData.FirstName,
+		LastName:  input.ProfileData.LastName,
 	}).Get(ctx, nil)
 	if err != nil {
 		logger.Warn("Welcome email failed (non-critical)", "error", err)
@@ -393,10 +418,10 @@ func AgentOnboardingWorkflow(ctx workflow.Context, input activities.OnboardingIn
 
 	// Send welcome SMS
 	err = workflow.ExecuteActivity(ctx, a.SendWelcomeSMSActivity, activities.SendWelcomeSMSInput{
-		AgentID:       agentID,
-		AgentCode:     agentCode,
-		MobileNumber:  input.ProfileData.MobileNumber,
-		FirstName:     input.ProfileData.FirstName,
+		AgentID:      agentID,
+		AgentCode:    agentCode,
+		MobileNumber: input.ProfileData.MobileNumber,
+		FirstName:    input.ProfileData.FirstName,
 	}).Get(ctx, nil)
 	if err != nil {
 		logger.Warn("Welcome SMS failed (non-critical)", "error", err)
@@ -406,10 +431,10 @@ func AgentOnboardingWorkflow(ctx workflow.Context, input activities.OnboardingIn
 	logger.Info("Step 9: Completing onboarding")
 
 	result := &activities.OnboardingOutput{
-		AgentID:         agentID,
-		AgentCode:       agentCode,
-		Status:          "ACTIVE",
-		Message:         "Agent onboarding completed successfully",
+		AgentID:          agentID,
+		AgentCode:        agentCode,
+		Status:           "ACTIVE",
+		Message:          "Agent onboarding completed successfully",
 		ProfileCreatedAt: time.Now(),
 	}
 

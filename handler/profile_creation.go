@@ -388,7 +388,7 @@ func (h *AgentProfileCreationHandler) ValidateProfile(sctx *serverRoute.Context,
 	// ATOMIC: Update workflow state using UPDATE...RETURNING
 	// Only update if validation passed, otherwise keep current state
 	if len(validationErrors) == 0 {
-		_, err = h.sessionRepo.UpdateWorkflowState(sctx.Ctx, req.SessionID, domain.WorkflowStateProfileValidation, "VALIDATION_COMPLETE", "PROFILE_SUBMISSION", 80, req.SessionID)
+		err = h.sessionRepo.UpdateWorkflowState(sctx.Ctx, req.SessionID, domain.WorkflowStateProfileValidation, "VALIDATION_COMPLETE", "PROFILE_SUBMISSION", 80, req.SessionID)
 		if err != nil {
 			log.Error(sctx.Ctx, "Error updating workflow state: %v", err)
 			return nil, err
@@ -472,28 +472,12 @@ func (h *AgentProfileCreationHandler) SubmitProfile(sctx *serverRoute.Context, r
 
 	log.Info(sctx.Ctx, "Temporal workflow started: %s (run: %s)", we.GetID(), we.GetRunID())
 
-	// ATOMIC: Link Temporal workflow + update state in single database round trip
-	// CRITICAL: Prevents inconsistent state where workflow is linked but state is not updated
-	// If LinkTemporalWorkflow succeeds but UpdateWorkflowState fails, session is left in inconsistent state
-	_, err = h.sessionRepo.LinkTemporalWorkflowAndUpdateStateReturning(
-		sctx.Ctx,
-		req.SessionID,
-		we.GetID(),
-		we.GetRunID(),
-		domain.WorkflowStateProfileSubmitting,
-		"PROFILE_SUBMITTED",
-		"COMPLETION",
-		90,
-		req.SubmittedBy,
-	)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error linking workflow and updating state: %v", err)
-		// Workflow is already started - cannot rollback
-		// Consider canceling workflow here if needed
-		return nil, fmt.Errorf("failed to update session with workflow details: %w", err)
-	}
+	// NOTE: The workflow itself will record its start in the database as the FIRST activity
+	// This ensures self-healing: If database update fails, Temporal retries the activity
+	// The workflow doesn't proceed until the database knows about it
+	// See RecordWorkflowStartActivity in agent_onboarding_workflow.go
 
-	log.Info(sctx.Ctx, "Profile submitted successfully with workflow: %s", we.GetID())
+	log.Info(sctx.Ctx, "Profile submitted successfully - workflow will record itself in database")
 
 	return &resp.SubmitProfileResponse{
 		StatusCodeAndMessage: port.CreateSuccess,
