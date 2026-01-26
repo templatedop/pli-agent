@@ -99,9 +99,9 @@ type FetchHRMSEmployeeRequest struct {
 // FR-AGT-PRF-003: Advisor Coordinator Selection
 // BR-AGT-PRF-001: Advisor Coordinator Linkage Requirement
 type LinkCoordinatorRequest struct {
-	SessionID             string         `uri:"session_id" validate:"required,uuid4"`
-	CoordinatorID         string         `json:"coordinator_id" validate:"required,uuid4"`
-	LinkageEffectiveDate  sql.NullTime   `json:"linkage_effective_date" validate:"omitempty"`
+	SessionID            string       `uri:"session_id" validate:"required,uuid4"`
+	CoordinatorID        string       `json:"coordinator_id" validate:"required,uuid4"`
+	LinkageEffectiveDate sql.NullTime `json:"linkage_effective_date" validate:"omitempty"`
 }
 
 // GetAdvisorCoordinatorsQuery query params for coordinator list
@@ -113,4 +113,13 @@ type GetAdvisorCoordinatorsQuery struct {
 	DivisionID string `query:"division_id" validate:"omitempty"`
 	Page       uint64 `query:"page" validate:"omitempty,min=1"`
 	Limit      uint64 `query:"limit" validate:"omitempty,min=1,max=100"`
+}
+
+// SubmitProfileRequest submits profile for creation
+// AGT-006: Submit Profile for Creation
+// FR-AGT-PRF-001: New Profile Creation
+// WF-002: Agent Onboarding Workflow
+type SubmitProfileRequest struct {
+	SessionID   string `uri:"session_id" validate:"required,uuid4"`
+	SubmittedBy string `json:"submitted_by" validate:"required"`
 }

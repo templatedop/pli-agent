@@ -1,11 +1,18 @@
 package bootstrap
 
 import (
-	"go.uber.org/fx"
+	"context"
+
+	config "gitlab.cept.gov.in/it-2.0-common/api-config"
 	serverHandler "gitlab.cept.gov.in/it-2.0-common/n-api-server/handler"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/worker"
+	"go.uber.org/fx"
 
 	handler "pli-agent-api/handler"
 	repo "pli-agent-api/repo/postgres"
+	"pli-agent-api/workflows"
+	"pli-agent-api/workflows/activities"
 )
 
 // FxRepo module provides all repository implementations
@@ -20,6 +27,7 @@ var FxRepo = fx.Module(
 		repo.NewAgentBankDetailsRepository,
 		repo.NewAgentLicenseRepository,
 		repo.NewAgentAuditLogRepository,
+		repo.NewAgentProfileSessionRepository, // Phase 5: Session management
 		// Add more repository constructors here as needed
 	),
 )
@@ -48,7 +56,13 @@ var FxHandler = fx.Module(
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// TODO: PHASE 5 - Add profile creation handlers
+		// PHASE 5: Profile Creation & Session Management (AGT-001 to AGT-006, AGT-016 to AGT-019)
+		// Agent Profile Creation Handler with Temporal WF-002 integration
+		fx.Annotate(
+			handler.NewAgentProfileCreationHandler,
+			fx.As(new(serverHandler.Handler)),
+			fx.ResultTags(serverHandler.ServerControllersGroupTag),
+		),
 		// TODO: PHASE 6 - Add profile update handlers
 		// TODO: PHASE 7 - Add license management handlers
 		// TODO: PHASE 8 - Add status management handlers
@@ -57,34 +71,98 @@ var FxHandler = fx.Module(
 	),
 )
 
-// FxTemporal module provides Temporal client and worker (Optional - for workflows)
-// Uncomment when implementing long-running workflows
-// var FxTemporal = fx.Module(
-// 	"Temporalmodule",
-// 	fx.Provide(
-// 		// Provide Temporal client
-// 		func(cfg *config.Config) (client.Client, error) {
-// 			return client.NewClient(client.Options{
-// 				HostPort: cfg.GetString("temporal.hostport"),
-// 			})
-// 		},
-//
-// 		// Provide activity structs
-// 		// activities.NewAgentProfileActivities,
-// 	),
-//
-// 	fx.Invoke(
-// 		// Register workflows and activities with worker
-// 		func(c client.Client) error {
-// 			w := worker.New(c, "agent-profile-management-queue", worker.Options{})
-//
-// 			// Register workflows
-// 			// w.RegisterWorkflow(workflows.AgentOnboardingWorkflow)
-//
-// 			// Register activities
-// 			// w.RegisterActivity(activities.ValidateHRMSEmployee)
-//
-// 			return w.Start()
-// 		},
-// 	),
-// )
+// FxTemporal module provides Temporal client and worker for Agent Profile Management workflows
+// Phase 5: WF-002 - Agent Onboarding Workflow
+var FxTemporal = fx.Module(
+	"Temporalmodule",
+	fx.Provide(
+		// Provide Temporal client
+		func(cfg *config.Config) (client.Client, error) {
+			hostPort := cfg.GetString("temporal.hostport")
+			if hostPort == "" {
+				hostPort = "localhost:7233" // Default Temporal server address
+			}
+
+			return client.NewClient(client.Options{
+				HostPort:  hostPort,
+				Namespace: cfg.GetString("temporal.namespace"),
+			})
+		},
+
+		// Provide activity structs with repository dependencies
+		activities.NewAgentOnboardingActivities,
+	),
+
+	fx.Invoke(
+		// Register workflows and activities with worker
+		func(lc fx.Lifecycle, c client.Client, cfg *config.Config, activities *activities.AgentOnboardingActivities) error {
+			taskQueue := cfg.GetString("temporal.taskqueue")
+			if taskQueue == "" {
+				taskQueue = "agent-profile-task-queue" // Default task queue
+			}
+
+			w := worker.New(c, taskQueue, worker.Options{
+				MaxConcurrentWorkflowTaskExecutionSize:  cfg.GetInt("temporal.worker.max_concurrent_workflow"),
+				MaxConcurrentActivityExecutionSize:      cfg.GetInt("temporal.worker.max_concurrent_activities"),
+				MaxConcurrentLocalActivityExecutionSize: cfg.GetInt("temporal.worker.max_concurrent_local_activities"),
+				MaxConcurrentActivityTaskPollers:        cfg.GetInt("temporal.worker.max_pollers"),
+			})
+
+			// Register workflows
+			// WF-002: Agent Onboarding Workflow
+			w.RegisterWorkflow(workflows.AgentOnboardingWorkflow)
+
+			// Register all activities for WF-002
+			// ACT-011: ValidateAgentTypeActivity
+			w.RegisterActivity(activities.ValidateAgentTypeActivity)
+			// ACT-012: ValidateProfileDataActivity
+			w.RegisterActivity(activities.ValidateProfileDataActivity)
+			// ACT-013: ValidateEmployeeIDActivity
+			w.RegisterActivity(activities.ValidateEmployeeIDActivity)
+			// ACT-014: FetchHRMSDataActivity
+			w.RegisterActivity(activities.FetchHRMSDataActivity)
+			// ACT-015: AutoPopulateProfileActivity
+			w.RegisterActivity(activities.AutoPopulateProfileActivity)
+			// ACT-016: ValidateAdvisorCoordinatorActivity
+			w.RegisterActivity(activities.ValidateAdvisorCoordinatorActivity)
+			// ACT-017: ValidatePANUniquenessActivity
+			w.RegisterActivity(activities.ValidatePANUniquenessActivity)
+			// ACT-018: ValidateMandatoryFieldsActivity
+			w.RegisterActivity(activities.ValidateMandatoryFieldsActivity)
+			// ACT-019: UploadKYCDocumentsActivity
+			w.RegisterActivity(activities.UploadKYCDocumentsActivity)
+			// ACT-020: ValidateDocumentsActivity
+			w.RegisterActivity(activities.ValidateDocumentsActivity)
+			// ACT-021: CheckApprovalRequiredActivity
+			w.RegisterActivity(activities.CheckApprovalRequiredActivity)
+			// ACT-022: SendApprovalRequestActivity
+			w.RegisterActivity(activities.SendApprovalRequestActivity)
+			// ACT-023: GenerateAgentCodeActivity
+			w.RegisterActivity(activities.GenerateAgentCodeActivity)
+			// ACT-024: CreateAgentProfileActivity
+			w.RegisterActivity(activities.CreateAgentProfileActivity)
+			// ACT-025: LinkToHierarchyActivity
+			w.RegisterActivity(activities.LinkToHierarchyActivity)
+			// ACT-026: CreateLicenseRecordActivity
+			w.RegisterActivity(activities.CreateLicenseRecordActivity)
+			// ACT-027: SendWelcomeEmailActivity
+			w.RegisterActivity(activities.SendWelcomeEmailActivity)
+			// ACT-028: SendWelcomeSMSActivity
+			w.RegisterActivity(activities.SendWelcomeSMSActivity)
+
+			// Start worker in lifecycle
+			lc.Append(fx.Hook{
+				OnStart: func(ctx context.Context) error {
+					return w.Start()
+				},
+				OnStop: func(ctx context.Context) error {
+					w.Stop()
+					c.Close()
+					return nil
+				},
+			})
+
+			return nil
+		},
+	),
+)

@@ -68,8 +68,16 @@ info:
   description: "API for managing insurance agent profiles, licenses, and status"
 
 # Temporal workflow configuration (for long-running processes)
+# WF-002: Agent Onboarding Workflow
 temporal:
-  enabled: false  # Enable when implementing workflows
+  enabled: false  # Enable when implementing workflows (set to true in dev/test)
   hostport: "localhost:7233"
   namespace: "default"
-  taskqueue: "agent-profile-management-queue"
+  taskqueue: "agent-profile-task-queue"
+
+  # Worker configuration
+  worker:
+    max_concurrent_workflow: 100        # Max concurrent workflow executions
+    max_concurrent_activities: 200      # Max concurrent activity executions
+    max_concurrent_local_activities: 50 # Max concurrent local activity executions
+    max_pollers: 2                      # Number of pollers for task queue

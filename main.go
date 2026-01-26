@@ -12,9 +12,9 @@ import (
 // including onboarding, profile maintenance, licensing, and status management
 func main() {
 	app := bootstrapper.New().Options(
-		bootstrap.FxHandler, // Register all HTTP handlers
-		bootstrap.FxRepo,    // Register all repositories
-		// bootstrap.FxTemporal, // Register Temporal workflows (uncomment when workflows are implemented)
+		bootstrap.FxHandler,  // Register all HTTP handlers
+		bootstrap.FxRepo,     // Register all repositories
+		bootstrap.FxTemporal, // Register Temporal workflows (Phase 5: WF-002 Agent Onboarding)
 	)
 	app.WithContext(context.Background()).Run()
 }

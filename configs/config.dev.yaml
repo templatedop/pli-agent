@@ -11,3 +11,7 @@ db:
 cache:
   isredisenabled: false
   islocalcacheenabled: true
+
+# Enable Temporal workflows in development
+temporal:
+  enabled: true  # Enable for WF-002: Agent Onboarding Workflow
