@@ -158,13 +158,14 @@ func (r *AgentProfileSessionRepository) Complete(ctx context.Context, sessionID,
 
 // Cancel cancels a session
 // AGT-019: Cancel Session
-func (r *AgentProfileSessionRepository) Cancel(ctx context.Context, sessionID string) error {
+func (r *AgentProfileSessionRepository) Cancel(ctx context.Context, sessionID, updatedBy string) error {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
 	query := dblib.Psql.Update(sessionTable).
 		Set("status", domain.SessionStatusCancelled).
 		Set("workflow_state", domain.WorkflowStateCancelled).
+		Set("last_updated_by", updatedBy).
 		Set("updated_at", time.Now()).
 		Where(sq.Eq{"session_id": sessionID})
 
@@ -208,4 +209,110 @@ func (r *AgentProfileSessionRepository) MarkExpiredSessions(ctx context.Context)
 	}
 
 	return count, nil
+}
+
+// ========================================================================
+// ATOMIC BATCH OPERATIONS (Single Round-Trip to Database)
+// ========================================================================
+
+// SaveFormDataAndUpdateWorkflowStateReturning atomically saves form data and updates workflow state
+// Returns the updated session in a single database round trip
+// AGT-002, AGT-004, AGT-005: Profile creation workflow handlers
+func (r *AgentProfileSessionRepository) SaveFormDataAndUpdateWorkflowStateReturning(
+	ctx context.Context,
+	sessionID string,
+	formDataJSON string,
+	workflowState string,
+	currentStep string,
+	nextStep string,
+	progressPercentage int,
+	updatedBy string,
+) (*domain.AgentProfileSession, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	// Single UPDATE with RETURNING - atomic operation
+	query := dblib.Psql.Update(sessionTable).
+		Set("form_data", formDataJSON).
+		Set("workflow_state", workflowState).
+		Set("current_step", currentStep).
+		Set("next_step", nextStep).
+		Set("progress_percentage", progressPercentage).
+		Set("last_updated_by", updatedBy).
+		Set("updated_at", time.Now()).
+		Where(sq.Eq{"session_id": sessionID}).
+		Suffix("RETURNING *")
+
+	var result domain.AgentProfileSession
+	err := dblib.SelectOne(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentProfileSession], &result)
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// LinkTemporalWorkflowAndUpdateStateReturning atomically links Temporal workflow and updates state
+// Returns the updated session in a single database round trip
+// AGT-006: Submit Profile for Creation
+// Ensures atomicity - either both workflow link and state update succeed, or both fail
+func (r *AgentProfileSessionRepository) LinkTemporalWorkflowAndUpdateStateReturning(
+	ctx context.Context,
+	sessionID string,
+	workflowID string,
+	runID string,
+	workflowState string,
+	currentStep string,
+	nextStep string,
+	progressPercentage int,
+	updatedBy string,
+) (*domain.AgentProfileSession, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	// Single UPDATE with RETURNING - atomic operation
+	// Prevents inconsistent state where workflow is linked but state is not updated
+	query := dblib.Psql.Update(sessionTable).
+		Set("temporal_workflow_id", workflowID).
+		Set("temporal_run_id", runID).
+		Set("workflow_state", workflowState).
+		Set("current_step", currentStep).
+		Set("next_step", nextStep).
+		Set("progress_percentage", progressPercentage).
+		Set("last_updated_by", updatedBy).
+		Set("updated_at", time.Now()).
+		Where(sq.Eq{"session_id": sessionID}).
+		Suffix("RETURNING *")
+
+	var result domain.AgentProfileSession
+	err := dblib.SelectOne(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentProfileSession], &result)
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// CancelReturning atomically cancels session and returns result
+// Single database round trip using UPDATE...RETURNING
+// AGT-019: Cancel Session
+func (r *AgentProfileSessionRepository) CancelReturning(ctx context.Context, sessionID string, updatedBy string) (*domain.AgentProfileSession, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	query := dblib.Psql.Update(sessionTable).
+		Set("status", domain.SessionStatusCancelled).
+		Set("workflow_state", domain.WorkflowStateCancelled).
+		Set("last_updated_by", updatedBy).
+		Set("updated_at", time.Now()).
+		Where(sq.Eq{"session_id": sessionID}).
+		Suffix("RETURNING *")
+
+	var result domain.AgentProfileSession
+	err := dblib.SelectOne(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentProfileSession], &result)
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
 }

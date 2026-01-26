@@ -111,6 +111,8 @@ var FxTemporal = fx.Module(
 			// Register workflows
 			// WF-002: Agent Onboarding Workflow
 			w.RegisterWorkflow(workflows.AgentOnboardingWorkflow)
+			// Agent Approval Child Workflow (human-in-the-loop pattern)
+			w.RegisterWorkflow(workflows.AgentApprovalWorkflow)
 
 			// Register all activities for WF-002
 			// ACT-011: ValidateAgentTypeActivity
@@ -149,6 +151,8 @@ var FxTemporal = fx.Module(
 			w.RegisterActivity(activities.SendWelcomeEmailActivity)
 			// ACT-028: SendWelcomeSMSActivity
 			w.RegisterActivity(activities.SendWelcomeSMSActivity)
+			// SendApprovalNotificationActivity (used by approval child workflow)
+			w.RegisterActivity(activities.SendApprovalNotificationActivity)
 
 			// Start worker in lifecycle
 			lc.Append(fx.Hook{

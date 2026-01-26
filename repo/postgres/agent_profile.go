@@ -160,15 +160,15 @@ func (r *AgentProfileRepository) FindByPAN(ctx context.Context, panNumber string
 // FR-AGT-PRF-021: Multi-Criteria Agent Search
 // BR-AGT-PRF-022: Multi-Criteria Agent Search
 type AgentSearchFilters struct {
-	Status             string
-	AgentType          string
-	CircleID           string
-	DivisionID         string
-	CoordinatorID      string
-	OfficeCode         string
-	Name               string
-	MobileNumber       string
-	Email              string
+	Status        string
+	AgentType     string
+	CircleID      string
+	DivisionID    string
+	CoordinatorID string
+	OfficeCode    string
+	Name          string
+	MobileNumber  string
+	Email         string
 }
 
 func (r *AgentProfileRepository) List(ctx context.Context, filters AgentSearchFilters, skip, limit uint64, orderBy, sortType string) ([]domain.AgentProfile, int64, error) {
@@ -385,9 +385,9 @@ func (r *AgentProfileRepository) GetActiveAdvisorCoordinators(ctx context.Contex
 	query := dblib.Psql.Select("agent_id", "agent_code", "first_name", "middle_name", "last_name", "circle_id", "division_id").
 		From(agentProfileTable).
 		Where(sq.Eq{
-			"agent_type":  domain.AgentTypeAdvisorCoordinator,
-			"status":      domain.AgentStatusActive,
-			"deleted_at":  nil,
+			"agent_type": domain.AgentTypeAdvisorCoordinator,
+			"status":     domain.AgentStatusActive,
+			"deleted_at": nil,
 		})
 
 	// Apply geographic filters if provided
@@ -428,4 +428,195 @@ func (r *AgentProfileRepository) ValidatePANUniqueness(ctx context.Context, panN
 	}
 
 	return count == 0, nil
+}
+
+// ========================================================================
+// ATOMIC BATCH OPERATIONS (Single Round-Trip to Database)
+// ========================================================================
+
+// CreateWithRelatedEntitiesInput holds all data for atomic profile creation
+type CreateWithRelatedEntitiesInput struct {
+	Profile   domain.AgentProfile
+	Addresses []domain.AgentAddress
+	Contacts  []domain.AgentContact
+	Emails    []domain.AgentEmail
+}
+
+// CreateWithRelatedEntities atomically creates agent profile with all related entities
+// Single database round trip using CTE pattern with UNNEST for bulk inserts
+// ACT-024: CreateAgentProfileActivity
+// FR-AGT-PRF-001: New Profile Creation
+// Ensures atomicity: Either all entities are created, or none are (transaction)
+func (r *AgentProfileRepository) CreateWithRelatedEntities(ctx context.Context, input CreateWithRelatedEntitiesInput) (*domain.AgentProfile, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutHigh"))
+	defer cancel()
+
+	profile := input.Profile
+
+	// Build arrays for UNNEST bulk insert
+	var (
+		// Address arrays
+		addrAgentIDs    []string
+		addrTypes       []string
+		addrLine1s      []string
+		addrLine2s      []string
+		addrLine3s      []string
+		addrCities      []string
+		addrDistricts   []string
+		addrStates      []string
+		addrCountries   []string
+		addrPincodes    []string
+		addrIsPrimaries []bool
+		addrValidFroms  []time.Time
+		addrCreatedBys  []string
+
+		// Contact arrays
+		contactAgentIDs    []string
+		contactTypes       []string
+		contactNumbers     []string
+		contactIsPrimaries []bool
+		contactIsVerifieds []bool
+		contactCreatedBys  []string
+
+		// Email arrays
+		emailAgentIDs    []string
+		emailAddresses   []string
+		emailIsPrimaries []bool
+		emailIsVerifieds []bool
+		emailCreatedBys  []string
+	)
+
+	// We'll use a placeholder for agent_id - it will be filled from the CTE
+	agentIDPlaceholder := "<<AGENT_ID>>"
+
+	// Prepare address arrays
+	for _, addr := range input.Addresses {
+		addrAgentIDs = append(addrAgentIDs, agentIDPlaceholder)
+		addrTypes = append(addrTypes, addr.AddressType)
+		addrLine1s = append(addrLine1s, addr.Line1)
+		addrLine2s = append(addrLine2s, addr.Line2.String)
+		addrLine3s = append(addrLine3s, addr.Line3.String)
+		addrCities = append(addrCities, addr.City)
+		addrDistricts = append(addrDistricts, addr.District.String)
+		addrStates = append(addrStates, addr.State)
+		addrCountries = append(addrCountries, addr.Country)
+		addrPincodes = append(addrPincodes, addr.Pincode)
+		addrIsPrimaries = append(addrIsPrimaries, addr.IsPrimary)
+		addrValidFroms = append(addrValidFroms, addr.ValidFrom)
+		addrCreatedBys = append(addrCreatedBys, profile.CreatedBy)
+	}
+
+	// Prepare contact arrays
+	for _, contact := range input.Contacts {
+		contactAgentIDs = append(contactAgentIDs, agentIDPlaceholder)
+		contactTypes = append(contactTypes, contact.ContactType)
+		contactNumbers = append(contactNumbers, contact.ContactNumber)
+		contactIsPrimaries = append(contactIsPrimaries, contact.IsPrimary)
+		contactIsVerifieds = append(contactIsVerifieds, contact.IsVerified)
+		contactCreatedBys = append(contactCreatedBys, profile.CreatedBy)
+	}
+
+	// Prepare email arrays
+	for _, email := range input.Emails {
+		emailAgentIDs = append(emailAgentIDs, agentIDPlaceholder)
+		emailAddresses = append(emailAddresses, email.EmailAddress)
+		emailIsPrimaries = append(emailIsPrimaries, email.IsPrimary)
+		emailIsVerifieds = append(emailIsVerifieds, email.IsVerified)
+		emailCreatedBys = append(emailCreatedBys, profile.CreatedBy)
+	}
+
+	// Build the complex CTE query
+	// Uses CTEs to:
+	// 1. INSERT profile and get agent_id
+	// 2. INSERT addresses using UNNEST with agent_id from step 1
+	// 3. INSERT contacts using UNNEST with agent_id from step 1
+	// 4. INSERT emails using UNNEST with agent_id from step 1
+	// 5. INSERT audit log with agent_id from step 1
+	// All in single atomic transaction
+	sql := `
+		WITH inserted_profile AS (
+			INSERT INTO agent_profiles (
+				agent_type, employee_id, office_code, circle_id, division_id,
+				advisor_coordinator_id, title, first_name, middle_name, last_name,
+				gender, date_of_birth, category, marital_status, aadhar_number,
+				pan_number, designation_rank, service_number, professional_title,
+				status, status_date, distribution_channel, product_class,
+				external_identification_number, workflow_state, created_by
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+			RETURNING *
+		),
+		inserted_addresses AS (
+			INSERT INTO agent_addresses (agent_id, address_type, line1, line2, line3, city, district, state, country, pincode, is_primary, valid_from, created_by)
+			SELECT ip.agent_id, addr_type, addr_line1, addr_line2, addr_line3, addr_city, addr_district, addr_state, addr_country, addr_pincode, addr_is_primary, addr_valid_from, addr_created_by
+			FROM inserted_profile ip
+			CROSS JOIN UNNEST(
+				$27::text[], $28::text[], $29::text[], $30::text[], $31::text[], $32::text[], $33::text[], $34::text[], $35::text[],
+				$36::boolean[], $37::timestamp[], $38::text[]
+			) AS t(addr_type, addr_line1, addr_line2, addr_line3, addr_city, addr_district, addr_state, addr_country, addr_pincode, addr_is_primary, addr_valid_from, addr_created_by)
+			WHERE ARRAY_LENGTH($27::text[], 1) > 0
+			RETURNING *
+		),
+		inserted_contacts AS (
+			INSERT INTO agent_contacts (agent_id, contact_type, contact_number, is_primary, is_verified, created_by)
+			SELECT ip.agent_id, contact_type, contact_number, contact_is_primary, contact_is_verified, contact_created_by
+			FROM inserted_profile ip
+			CROSS JOIN UNNEST(
+				$39::text[], $40::text[], $41::boolean[], $42::boolean[], $43::text[]
+			) AS t(contact_type, contact_number, contact_is_primary, contact_is_verified, contact_created_by)
+			WHERE ARRAY_LENGTH($39::text[], 1) > 0
+			RETURNING *
+		),
+		inserted_emails AS (
+			INSERT INTO agent_emails (agent_id, email_address, is_primary, is_verified, created_by)
+			SELECT ip.agent_id, email_address, email_is_primary, email_is_verified, email_created_by
+			FROM inserted_profile ip
+			CROSS JOIN UNNEST(
+				$44::text[], $45::boolean[], $46::boolean[], $47::text[]
+			) AS t(email_address, email_is_primary, email_is_verified, email_created_by)
+			WHERE ARRAY_LENGTH($44::text[], 1) > 0
+			RETURNING *
+		),
+		inserted_audit AS (
+			INSERT INTO agent_audit_logs (agent_id, action_type, action_reason, performed_by, performed_at)
+			SELECT agent_id, $48, $49, $50, $51
+			FROM inserted_profile
+			RETURNING *
+		)
+		SELECT * FROM inserted_profile
+	`
+
+	args := []interface{}{
+		// Profile fields ($1 to $26)
+		profile.AgentType, profile.EmployeeID, profile.OfficeCode, profile.CircleID,
+		profile.DivisionID, profile.AdvisorCoordinatorID, profile.Title, profile.FirstName,
+		profile.MiddleName, profile.LastName, profile.Gender, profile.DateOfBirth,
+		profile.Category, profile.MaritalStatus, profile.AadharNumber, profile.PANNumber,
+		profile.DesignationRank, profile.ServiceNumber, profile.ProfessionalTitle,
+		profile.Status, profile.StatusDate, profile.DistributionChannel, profile.ProductClass,
+		profile.ExternalIdentificationNumber, profile.WorkflowState, profile.CreatedBy,
+		// Address arrays ($27 to $38)
+		addrTypes, addrLine1s, addrLine2s, addrLine3s, addrCities, addrDistricts,
+		addrStates, addrCountries, addrPincodes, addrIsPrimaries, addrValidFroms, addrCreatedBys,
+		// Contact arrays ($39 to $43)
+		contactTypes, contactNumbers, contactIsPrimaries, contactIsVerifieds, contactCreatedBys,
+		// Email arrays ($44 to $47)
+		emailAddresses, emailIsPrimaries, emailIsVerifieds, emailCreatedBys,
+		// Audit fields ($48 to $51)
+		domain.AuditActionCreate, "Agent profile created", profile.CreatedBy, time.Now(),
+	}
+
+	batch := &pgx.Batch{}
+	var result domain.AgentProfile
+	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentProfile], &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to queue profile creation: %w", err)
+	}
+
+	// Execute batch
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute profile creation: %w", err)
+	}
+
+	return &result, nil
 }

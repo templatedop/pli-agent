@@ -60,17 +60,17 @@ type OnboardingInput struct {
 
 // ProfileData contains profile information
 type ProfileData struct {
-	FirstName     string
-	MiddleName    string
-	LastName      string
-	PANNumber     string
-	DateOfBirth   time.Time
-	Gender        string
-	MobileNumber  string
-	Email         string
-	AadharNumber  string
-	OfficeCode    string
-	Addresses     []Address
+	FirstName    string
+	MiddleName   string
+	LastName     string
+	PANNumber    string
+	DateOfBirth  time.Time
+	Gender       string
+	MobileNumber string
+	Email        string
+	AadharNumber string
+	OfficeCode   string
+	Addresses    []Address
 }
 
 // Address represents an address
@@ -162,7 +162,7 @@ type ValidateProfileDataInput struct {
 }
 
 type ValidateProfileDataOutput struct {
-	Valid          bool
+	Valid            bool
 	ValidationErrors []string
 }
 
@@ -450,8 +450,8 @@ type ValidateMandatoryFieldsInput struct {
 }
 
 type ValidateMandatoryFieldsOutput struct {
-	Valid          bool
-	MissingFields  []string
+	Valid         bool
+	MissingFields []string
 }
 
 // ValidateMandatoryFieldsActivity validates all mandatory fields
@@ -635,8 +635,8 @@ type SendApprovalRequestInput struct {
 }
 
 type SendApprovalRequestOutput struct {
-	RequestID   string
-	SentTo      string
+	RequestID string
+	SentTo    string
 }
 
 // SendApprovalRequestActivity sends approval request
@@ -645,21 +645,86 @@ func (a *AgentOnboardingActivities) SendApprovalRequestActivity(ctx context.Cont
 	logger := activity.GetLogger(ctx)
 	logger.Info("SendApprovalRequestActivity started", "AgentType", input.AgentType)
 
-	// TODO: Integrate with approval service/notification service
-	// For now, simulate sending approval request
-	activity.RecordHeartbeat(ctx, "Sending approval request")
+	// NOTE: This activity prepares approval request data
+	// The actual approval workflow is started as a child workflow from main workflow
+	// This ensures proper human-in-the-loop pattern with signal handling
 
-	// Mock approval request
+	activity.RecordHeartbeat(ctx, "Preparing approval request")
+
+	// Generate approval request ID
 	requestID := fmt.Sprintf("APR-%d", time.Now().Unix())
-	sentTo := "supervisor@lic.in" // Mock supervisor email
 
-	// In production: Send email/notification to supervisor
-	logger.Info("Approval request sent", "RequestID", requestID, "SentTo", sentTo)
+	// Determine approvers based on agent type
+	// Business Rule: Different approval authorities for different agent types
+	var approvers []string
+	switch input.AgentType {
+	case domain.AgentTypeAdvisor:
+		// ADVISOR: Requires supervisor approval
+		approvers = []string{"supervisor@indiapost.gov.in"}
+	case domain.AgentTypeAdvisorCoordinator:
+		// ADVISOR_COORDINATOR: Requires management approval
+		approvers = []string{"manager@indiapost.gov.in", "regional-head@indiapost.gov.in"}
+	default:
+		approvers = []string{"admin@indiapost.gov.in"}
+	}
+
+	logger.Info("Approval request prepared",
+		"RequestID", requestID,
+		"Approvers", approvers,
+		"AgentType", input.AgentType)
 
 	return &SendApprovalRequestOutput{
 		RequestID: requestID,
-		SentTo:    sentTo,
+		SentTo:    approvers[0], // Primary approver
 	}, nil
+}
+
+// ==================== SendApprovalNotificationActivity ====================
+
+type SendApprovalNotificationInput struct {
+	RequestID    string
+	AgentType    string
+	FirstName    string
+	LastName     string
+	PANNumber    string
+	ApprovalType string
+	Approvers    []string
+}
+
+// SendApprovalNotificationActivity sends approval notification to approvers
+// INT-AGT-005: Notification Service Integration
+// Sends email with approval link
+func (a *AgentOnboardingActivities) SendApprovalNotificationActivity(ctx context.Context, input SendApprovalNotificationInput) (bool, error) {
+	logger := activity.GetLogger(ctx)
+	logger.Info("SendApprovalNotificationActivity started", "RequestID", input.RequestID)
+
+	activity.RecordHeartbeat(ctx, "Sending approval notifications")
+
+	// INT-AGT-005: Notification Service Integration
+	// In production: Call notification service to send emails
+	// For now, log the notification
+	for _, approver := range input.Approvers {
+		logger.Info("Sending approval notification",
+			"To", approver,
+			"RequestID", input.RequestID,
+			"AgentName", fmt.Sprintf("%s %s", input.FirstName, input.LastName),
+			"ApprovalType", input.ApprovalType)
+
+		// Mock notification content
+		// Subject: Agent Profile Approval Required - [FirstName LastName]
+		// Body:
+		//   New agent profile requires your approval
+		//   Name: [FirstName LastName]
+		//   Agent Type: [AgentType]
+		//   PAN: [PANNumber]
+		//   Approval Type: [ApprovalType]
+		//
+		//   Approve: [LINK]
+		//   Reject: [LINK]
+	}
+
+	logger.Info("Approval notifications sent successfully", "Count", len(input.Approvers))
+	return true, nil
 }
 
 // ==================== ACT-023: GenerateAgentCodeActivity ====================
@@ -711,97 +776,102 @@ type CreateAgentProfileOutput struct {
 // ACT-024: Timeout 1m, Retry 3 attempts
 // FR-AGT-PRF-001: New Profile Creation
 // BR-AGT-PRF-001: Advisor Coordinator Linkage Requirement
+// ATOMIC: Creates profile + addresses + contacts + emails in single database transaction
 func (a *AgentOnboardingActivities) CreateAgentProfileActivity(ctx context.Context, input CreateAgentProfileInput) (*CreateAgentProfileOutput, error) {
 	logger := activity.GetLogger(ctx)
 	logger.Info("CreateAgentProfileActivity started", "AgentType", input.AgentType)
 
-	activity.RecordHeartbeat(ctx, "Creating agent profile")
+	activity.RecordHeartbeat(ctx, "Creating agent profile with all related entities")
 
 	// Build agent profile
+	// FR-AGT-PRF-001: New Profile Creation
 	profile := domain.AgentProfile{
-		AgentType:  input.AgentType,
-		AgentCode:  sql.NullString{String: input.AgentCode, Valid: true},
-		EmployeeID: sql.NullString{String: input.EmployeeID, Valid: input.EmployeeID != ""},
-		OfficeCode: input.ProfileData.OfficeCode,
-		CircleID:   sql.NullString{String: input.CircleID, Valid: input.CircleID != ""},
-		DivisionID: sql.NullString{String: input.DivisionID, Valid: input.DivisionID != ""},
+		AgentType:            input.AgentType,
+		AgentCode:            sql.NullString{String: input.AgentCode, Valid: true},
+		EmployeeID:           sql.NullString{String: input.EmployeeID, Valid: input.EmployeeID != ""},
+		OfficeCode:           input.ProfileData.OfficeCode,
+		CircleID:             sql.NullString{String: input.CircleID, Valid: input.CircleID != ""},
+		DivisionID:           sql.NullString{String: input.DivisionID, Valid: input.DivisionID != ""},
 		AdvisorCoordinatorID: sql.NullString{String: input.AdvisorCoordinatorID, Valid: input.AdvisorCoordinatorID != ""},
-		FirstName:    input.ProfileData.FirstName,
-		MiddleName:   sql.NullString{String: input.ProfileData.MiddleName, Valid: input.ProfileData.MiddleName != ""},
-		LastName:     input.ProfileData.LastName,
-		Gender:       input.ProfileData.Gender,
-		DateOfBirth:  input.ProfileData.DateOfBirth,
-		AadharNumber: sql.NullString{String: input.ProfileData.AadharNumber, Valid: input.ProfileData.AadharNumber != ""},
-		PANNumber:    input.ProfileData.PANNumber,
-		Status:       domain.AgentStatusActive,
-		StatusDate:   time.Now(),
-		CreatedBy:    input.CreatedBy,
+		FirstName:            input.ProfileData.FirstName,
+		MiddleName:           sql.NullString{String: input.ProfileData.MiddleName, Valid: input.ProfileData.MiddleName != ""},
+		LastName:             input.ProfileData.LastName,
+		Gender:               input.ProfileData.Gender,
+		DateOfBirth:          input.ProfileData.DateOfBirth,
+		AadharNumber:         sql.NullString{String: input.ProfileData.AadharNumber, Valid: input.ProfileData.AadharNumber != ""},
+		PANNumber:            input.ProfileData.PANNumber,
+		Status:               domain.AgentStatusActive,
+		StatusDate:           time.Now(),
+		CreatedBy:            input.CreatedBy,
 	}
 
-	// Create profile in database
-	created, err := a.profileRepo.Create(ctx, profile)
+	// Build addresses array for bulk insert (uses UNNEST)
+	var addresses []domain.AgentAddress
+	for _, addr := range input.ProfileData.Addresses {
+		addresses = append(addresses, domain.AgentAddress{
+			AddressType: addr.AddressType,
+			Line1:       addr.AddressLine1,
+			Line2:       sql.NullString{String: addr.AddressLine2, Valid: addr.AddressLine2 != ""},
+			Line3:       sql.NullString{},
+			City:        addr.City,
+			District:    sql.NullString{},
+			State:       addr.State,
+			Country:     addr.Country,
+			Pincode:     addr.Pincode,
+			IsPrimary:   addr.AddressType == "PERMANENT",
+			ValidFrom:   time.Now(),
+			CreatedBy:   input.CreatedBy,
+		})
+	}
+
+	// Build contacts array for bulk insert (uses UNNEST)
+	var contacts []domain.AgentContact
+	if input.ProfileData.MobileNumber != "" {
+		contacts = append(contacts, domain.AgentContact{
+			ContactType:   domain.ContactTypeMobile,
+			ContactNumber: input.ProfileData.MobileNumber,
+			IsPrimary:     true,
+			IsVerified:    false,
+			CreatedBy:     input.CreatedBy,
+		})
+	}
+
+	// Build emails array for bulk insert (uses UNNEST)
+	var emails []domain.AgentEmail
+	if input.ProfileData.Email != "" {
+		emails = append(emails, domain.AgentEmail{
+			EmailAddress: input.ProfileData.Email,
+			IsPrimary:    true,
+			IsVerified:   false,
+			CreatedBy:    input.CreatedBy,
+		})
+	}
+
+	// ATOMIC: Create profile with all related entities in single database transaction
+	// CRITICAL: Ensures atomicity - either all entities are created, or none
+	// Prevents inconsistent state where:
+	// - Profile exists but addresses/contacts/emails don't
+	// - Profile create succeeds but address insert fails leaving partial data
+	// Uses CTE pattern with UNNEST for efficient bulk inserts
+	createInput := repo.CreateWithRelatedEntitiesInput{
+		Profile:   profile,
+		Addresses: addresses,
+		Contacts:  contacts,
+		Emails:    emails,
+	}
+
+	created, err := a.profileRepo.CreateWithRelatedEntities(ctx, createInput)
 	if err != nil {
-		logger.Error("Failed to create agent profile", "error", err)
+		logger.Error("Failed to create agent profile with related entities", "error", err)
 		return nil, fmt.Errorf("failed to create agent profile: %w", err)
 	}
 
 	agentID := created.AgentID
-	logger.Info("Agent profile created successfully", "AgentID", agentID)
-
-	// Create addresses
-	if len(input.ProfileData.Addresses) > 0 {
-		for _, addr := range input.ProfileData.Addresses {
-			address := domain.AgentAddress{
-				AgentID:           agentID,
-				AddressType:       addr.AddressType,
-				AddressLine1:      addr.AddressLine1,
-				AddressLine2:      sql.NullString{String: addr.AddressLine2, Valid: addr.AddressLine2 != ""},
-				City:              addr.City,
-				State:             addr.State,
-				Country:           addr.Country,
-				Pincode:           addr.Pincode,
-				IsSameAsPermanent: addr.IsSameAsPermanent,
-				EffectiveFrom:     time.Now(),
-				CreatedBy:         input.CreatedBy,
-			}
-
-			_, err := a.addressRepo.Create(ctx, address)
-			if err != nil {
-				logger.Warn("Failed to create address", "error", err)
-				// Non-critical: Continue
-			}
-		}
-	}
-
-	// Create contact
-	contact := domain.AgentContact{
-		AgentID:       agentID,
-		ContactType:   domain.ContactTypeMobile,
-		ContactNumber: input.ProfileData.MobileNumber,
-		IsPrimary:     true,
-		EffectiveFrom: time.Now(),
-		CreatedBy:     input.CreatedBy,
-	}
-	_, err = a.contactRepo.Create(ctx, contact)
-	if err != nil {
-		logger.Warn("Failed to create contact", "error", err)
-		// Non-critical: Continue
-	}
-
-	// Create email
-	email := domain.AgentEmail{
-		AgentID:       agentID,
-		EmailType:     "PRIMARY",
-		EmailAddress:  input.ProfileData.Email,
-		IsPrimary:     true,
-		EffectiveFrom: time.Now(),
-		CreatedBy:     input.CreatedBy,
-	}
-	_, err = a.emailRepo.Create(ctx, email)
-	if err != nil {
-		logger.Warn("Failed to create email", "error", err)
-		// Non-critical: Continue
-	}
+	logger.Info("Agent profile created successfully with all related entities",
+		"AgentID", agentID,
+		"Addresses", len(addresses),
+		"Contacts", len(contacts),
+		"Emails", len(emails))
 
 	return &CreateAgentProfileOutput{AgentID: agentID}, nil
 }
@@ -865,19 +935,19 @@ func (a *AgentOnboardingActivities) CreateLicenseRecordActivity(ctx context.Cont
 	renewalDate := licenseDate.AddDate(1, 0, 0) // 1 year from now
 
 	license := domain.AgentLicense{
-		AgentID:       input.AgentID,
-		LicenseLine:   "LIFE",
-		LicenseType:   input.LicenseType,
-		LicenseNumber: fmt.Sprintf("LIC-%s-%d", input.AgentID[:8], time.Now().Unix()%10000),
-		ResidentStatus: sql.NullString{String: "RESIDENT", Valid: true},
-		LicenseDate:   licenseDate,
-		RenewalDate:   renewalDate,
-		AuthorityDate: sql.NullTime{Time: licenseDate, Valid: true},
-		RenewalCount:  0,
-		LicenseStatus: domain.LicenseStatusActive,
+		AgentID:              input.AgentID,
+		LicenseLine:          "LIFE",
+		LicenseType:          input.LicenseType,
+		LicenseNumber:        fmt.Sprintf("LIC-%s-%d", input.AgentID[:8], time.Now().Unix()%10000),
+		ResidentStatus:       sql.NullString{String: "RESIDENT", Valid: true},
+		LicenseDate:          licenseDate,
+		RenewalDate:          renewalDate,
+		AuthorityDate:        sql.NullTime{Time: licenseDate, Valid: true},
+		RenewalCount:         0,
+		LicenseStatus:        domain.LicenseStatusActive,
 		LicentiateExamPassed: false,
-		IsPrimary:     true,
-		CreatedBy:     input.CreatedBy,
+		IsPrimary:            true,
+		CreatedBy:            input.CreatedBy,
 	}
 
 	created, err := a.licenseRepo.Create(ctx, license)

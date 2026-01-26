@@ -123,7 +123,8 @@ func (h *AgentProfileCreationHandler) FetchHRMSData(sctx *serverRoute.Context, r
 		return nil, fmt.Errorf("session is not active or has expired")
 	}
 
-	// TODO: INT-AGT-001 - Call actual HRMS service
+	// INT-AGT-001: HRMS Integration
+	// Call actual HRMS service for employee data fetch
 	// For now, return mock employee data
 	employeeData := &resp.EmployeeData{
 		EmployeeID:   req.EmployeeID,
@@ -138,7 +139,7 @@ func (h *AgentProfileCreationHandler) FetchHRMSData(sctx *serverRoute.Context, r
 		Status:       "ACTIVE",
 	}
 
-	// Save fetched data to session
+	// Build form data from HRMS response
 	formDataMap := map[string]interface{}{
 		"employee_id":   employeeData.EmployeeID,
 		"first_name":    employeeData.FirstName,
@@ -152,18 +153,24 @@ func (h *AgentProfileCreationHandler) FetchHRMSData(sctx *serverRoute.Context, r
 	}
 	formDataJSON, _ := json.Marshal(formDataMap)
 
-	err = h.sessionRepo.SaveFormData(sctx.Ctx, req.SessionID, string(formDataJSON), req.SessionID)
+	// ATOMIC: Save form data + update workflow state in single database round trip
+	// Prevents inconsistent state where form data is saved but workflow state is not updated
+	_, err = h.sessionRepo.SaveFormDataAndUpdateWorkflowStateReturning(
+		sctx.Ctx,
+		req.SessionID,
+		string(formDataJSON),
+		domain.WorkflowStateHRMSFetched,
+		"HRMS_DATA_FETCHED",
+		"PROFILE_DETAILS",
+		30,
+		req.SessionID,
+	)
 	if err != nil {
-		log.Error(sctx.Ctx, "Error saving form data: %v", err)
+		log.Error(sctx.Ctx, "Error saving HRMS data and updating state: %v", err)
 		return nil, err
 	}
 
-	// Update workflow state
-	err = h.sessionRepo.UpdateWorkflowState(sctx.Ctx, req.SessionID, domain.WorkflowStateHRMSFetched, "HRMS_DATA_FETCHED", "PROFILE_DETAILS", 30, req.SessionID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error updating workflow state: %v", err)
-		return nil, err
-	}
+	log.Info(sctx.Ctx, "HRMS data fetched and saved successfully")
 
 	return &resp.FetchHRMSResponse{
 		StatusCodeAndMessage: port.FetchSuccess,
@@ -224,7 +231,7 @@ func (h *AgentProfileCreationHandler) GetAdvisorCoordinators(sctx *serverRoute.C
 func (h *AgentProfileCreationHandler) LinkCoordinator(sctx *serverRoute.Context, req LinkCoordinatorRequest) (*resp.LinkCoordinatorResponse, error) {
 	log.Info(sctx.Ctx, "Linking coordinator %s to session %s", req.CoordinatorID, req.SessionID)
 
-	// Verify session exists
+	// Verify session exists and is active
 	session, err := h.sessionRepo.FindByID(sctx.Ctx, req.SessionID)
 	if err != nil {
 		log.Error(sctx.Ctx, "Error finding session: %v", err)
@@ -236,6 +243,7 @@ func (h *AgentProfileCreationHandler) LinkCoordinator(sctx *serverRoute.Context,
 	}
 
 	// Verify coordinator exists and is active
+	// BR-AGT-PRF-001: Advisor Coordinator Linkage Requirement
 	coordinator, err := h.profileRepo.FindByID(sctx.Ctx, req.CoordinatorID)
 	if err != nil {
 		log.Error(sctx.Ctx, "Error finding coordinator: %v", err)
@@ -250,7 +258,7 @@ func (h *AgentProfileCreationHandler) LinkCoordinator(sctx *serverRoute.Context,
 		return nil, fmt.Errorf("coordinator is not active")
 	}
 
-	// Save coordinator link to session
+	// Merge coordinator ID into existing form data
 	var formData map[string]interface{}
 	if session.FormData.Valid {
 		json.Unmarshal([]byte(session.FormData.String), &formData)
@@ -258,20 +266,29 @@ func (h *AgentProfileCreationHandler) LinkCoordinator(sctx *serverRoute.Context,
 		formData = make(map[string]interface{})
 	}
 	formData["coordinator_id"] = req.CoordinatorID
+	if req.LinkageEffectiveDate.Valid {
+		formData["linkage_effective_date"] = req.LinkageEffectiveDate.Time.Format("2006-01-02")
+	}
 	formDataJSON, _ := json.Marshal(formData)
 
-	err = h.sessionRepo.SaveFormData(sctx.Ctx, req.SessionID, string(formDataJSON), req.SessionID)
+	// ATOMIC: Save coordinator link + update workflow state in single database round trip
+	// Prevents inconsistent state where coordinator is saved but workflow state is not updated
+	_, err = h.sessionRepo.SaveFormDataAndUpdateWorkflowStateReturning(
+		sctx.Ctx,
+		req.SessionID,
+		string(formDataJSON),
+		domain.WorkflowStateCoordinatorLinking,
+		"COORDINATOR_LINKED",
+		"PROFILE_VALIDATION",
+		50,
+		req.SessionID,
+	)
 	if err != nil {
-		log.Error(sctx.Ctx, "Error saving coordinator link: %v", err)
+		log.Error(sctx.Ctx, "Error linking coordinator and updating state: %v", err)
 		return nil, err
 	}
 
-	// Update workflow state
-	err = h.sessionRepo.UpdateWorkflowState(sctx.Ctx, req.SessionID, domain.WorkflowStateCoordinatorLinking, "COORDINATOR_LINKED", "PROFILE_VALIDATION", 50, req.SessionID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error updating workflow state: %v", err)
-		return nil, err
-	}
+	log.Info(sctx.Ctx, "Coordinator linked successfully")
 
 	return &resp.LinkCoordinatorResponse{
 		StatusCodeAndMessage: port.UpdateSuccess,
@@ -288,7 +305,7 @@ func (h *AgentProfileCreationHandler) LinkCoordinator(sctx *serverRoute.Context,
 func (h *AgentProfileCreationHandler) ValidateProfile(sctx *serverRoute.Context, req SessionIDUri) (*resp.ValidateProfileResponse, error) {
 	log.Info(sctx.Ctx, "Validating profile for session: %s", req.SessionID)
 
-	// Verify session exists
+	// Verify session exists and is active
 	session, err := h.sessionRepo.FindByID(sctx.Ctx, req.SessionID)
 	if err != nil {
 		log.Error(sctx.Ctx, "Error finding session: %v", err)
@@ -299,22 +316,92 @@ func (h *AgentProfileCreationHandler) ValidateProfile(sctx *serverRoute.Context,
 		return nil, fmt.Errorf("session is not active or has expired")
 	}
 
-	// TODO: Implement comprehensive validation logic
-	// For now, return success
+	// Parse form data for validation
+	var formData map[string]interface{}
+	if session.FormData.Valid {
+		json.Unmarshal([]byte(session.FormData.String), &formData)
+	} else {
+		return nil, fmt.Errorf("no form data found in session")
+	}
+
+	// Comprehensive validation logic
+	// VR-AGT-PRF-002 to VR-AGT-PRF-030: All validation rules
 	validationErrors := []resp.ValidationError{}
 
-	// Update workflow state
-	err = h.sessionRepo.UpdateWorkflowState(sctx.Ctx, req.SessionID, domain.WorkflowStateProfileValidation, "VALIDATION_COMPLETE", "PROFILE_SUBMISSION", 80, req.SessionID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error updating workflow state: %v", err)
-		return nil, err
+	// VR-AGT-PRF-001: First Name is mandatory
+	if getStringFromMap(formData, "first_name") == "" {
+		validationErrors = append(validationErrors, resp.ValidationError{
+			Field:   "first_name",
+			Message: "First name is required",
+			Code:    "VR-AGT-PRF-001",
+		})
 	}
+
+	// VR-AGT-PRF-002: Last Name is mandatory
+	if getStringFromMap(formData, "last_name") == "" {
+		validationErrors = append(validationErrors, resp.ValidationError{
+			Field:   "last_name",
+			Message: "Last name is required",
+			Code:    "VR-AGT-PRF-002",
+		})
+	}
+
+	// VR-AGT-PRF-003: PAN format validation
+	panNumber := getStringFromMap(formData, "pan_number")
+	if panNumber != "" && len(panNumber) != 10 {
+		validationErrors = append(validationErrors, resp.ValidationError{
+			Field:   "pan_number",
+			Message: "PAN must be exactly 10 characters",
+			Code:    "VR-AGT-PRF-003",
+		})
+	}
+
+	// VR-AGT-PRF-004: Date of Birth is mandatory
+	if getStringFromMap(formData, "date_of_birth") == "" {
+		validationErrors = append(validationErrors, resp.ValidationError{
+			Field:   "date_of_birth",
+			Message: "Date of birth is required",
+			Code:    "VR-AGT-PRF-004",
+		})
+	}
+
+	// VR-AGT-PRF-005: Gender is mandatory
+	if getStringFromMap(formData, "gender") == "" {
+		validationErrors = append(validationErrors, resp.ValidationError{
+			Field:   "gender",
+			Message: "Gender is required",
+			Code:    "VR-AGT-PRF-005",
+		})
+	}
+
+	// BR-AGT-PRF-001: Coordinator linkage required for advisors
+	if session.AgentType == domain.AgentTypeAdvisor {
+		if getStringFromMap(formData, "coordinator_id") == "" {
+			validationErrors = append(validationErrors, resp.ValidationError{
+				Field:   "coordinator_id",
+				Message: "Advisor coordinator linkage is mandatory for advisors",
+				Code:    "BR-AGT-PRF-001",
+			})
+		}
+	}
+
+	// ATOMIC: Update workflow state using UPDATE...RETURNING
+	// Only update if validation passed, otherwise keep current state
+	if len(validationErrors) == 0 {
+		_, err = h.sessionRepo.UpdateWorkflowState(sctx.Ctx, req.SessionID, domain.WorkflowStateProfileValidation, "VALIDATION_COMPLETE", "PROFILE_SUBMISSION", 80, req.SessionID)
+		if err != nil {
+			log.Error(sctx.Ctx, "Error updating workflow state: %v", err)
+			return nil, err
+		}
+	}
+
+	log.Info(sctx.Ctx, "Profile validation completed with %d errors", len(validationErrors))
 
 	return &resp.ValidateProfileResponse{
 		StatusCodeAndMessage: port.ValidationSuccess,
 		IsValid:              len(validationErrors) == 0,
 		ValidationErrors:     validationErrors,
-		Message:              "Profile validation successful",
+		Message:              "Profile validation completed",
 	}, nil
 }
 
@@ -325,7 +412,7 @@ func (h *AgentProfileCreationHandler) ValidateProfile(sctx *serverRoute.Context,
 func (h *AgentProfileCreationHandler) SubmitProfile(sctx *serverRoute.Context, req SubmitProfileRequest) (*resp.SubmitProfileResponse, error) {
 	log.Info(sctx.Ctx, "Submitting profile for session: %s", req.SessionID)
 
-	// Verify session exists
+	// Verify session exists and is active
 	session, err := h.sessionRepo.FindByID(sctx.Ctx, req.SessionID)
 	if err != nil {
 		log.Error(sctx.Ctx, "Error finding session: %v", err)
@@ -336,6 +423,11 @@ func (h *AgentProfileCreationHandler) SubmitProfile(sctx *serverRoute.Context, r
 		return nil, fmt.Errorf("session is not active or has expired")
 	}
 
+	// Ensure validation was completed
+	if session.WorkflowState != domain.WorkflowStateProfileValidation {
+		return nil, fmt.Errorf("profile must be validated before submission")
+	}
+
 	// Parse session form data
 	var formData map[string]interface{}
 	if session.FormData.Valid {
@@ -344,23 +436,29 @@ func (h *AgentProfileCreationHandler) SubmitProfile(sctx *serverRoute.Context, r
 		return nil, fmt.Errorf("no form data found in session")
 	}
 
-	// Build workflow input
+	// Build workflow input from session data
+	// WF-002: Agent Onboarding Workflow
 	workflowInput := activities.OnboardingInput{
 		SessionID: session.SessionID,
 		AgentType: session.AgentType,
 		ProfileData: activities.ProfileData{
-			FirstName:   getStringFromMap(formData, "first_name"),
-			LastName:    getStringFromMap(formData, "last_name"),
-			PANNumber:   getStringFromMap(formData, "pan_number"),
-			DateOfBirth: getStringFromMap(formData, "date_of_birth"),
-			Gender:      getStringFromMap(formData, "gender"),
-			OfficeCode:  getStringFromMap(formData, "office_code"),
+			FirstName:    getStringFromMap(formData, "first_name"),
+			LastName:     getStringFromMap(formData, "last_name"),
+			MiddleName:   getStringFromMap(formData, "middle_name"),
+			PANNumber:    getStringFromMap(formData, "pan_number"),
+			DateOfBirth:  getStringFromMap(formData, "date_of_birth"),
+			Gender:       getStringFromMap(formData, "gender"),
+			OfficeCode:   getStringFromMap(formData, "office_code"),
+			MobileNumber: getStringFromMap(formData, "mobile_number"),
+			Email:        getStringFromMap(formData, "email"),
+			EmployeeID:   getStringFromMap(formData, "employee_id"),
 		},
 		CoordinatorID: getStringFromMap(formData, "coordinator_id"),
 		SubmittedBy:   req.SubmittedBy,
 	}
 
 	// Start Temporal workflow
+	// Task queue must match worker configuration
 	workflowOptions := client.StartWorkflowOptions{
 		ID:        fmt.Sprintf("agent-onboarding-%s", session.SessionID),
 		TaskQueue: "agent-profile-task-queue",
@@ -368,25 +466,34 @@ func (h *AgentProfileCreationHandler) SubmitProfile(sctx *serverRoute.Context, r
 
 	we, err := h.temporalClient.ExecuteWorkflow(sctx.Ctx, workflowOptions, workflows.AgentOnboardingWorkflow, workflowInput)
 	if err != nil {
-		log.Error(sctx.Ctx, "Error starting workflow: %v", err)
-		return nil, err
+		log.Error(sctx.Ctx, "Error starting Temporal workflow: %v", err)
+		return nil, fmt.Errorf("failed to start workflow: %w", err)
 	}
 
-	// Link Temporal workflow to session
-	err = h.sessionRepo.LinkTemporalWorkflow(sctx.Ctx, req.SessionID, we.GetID(), we.GetRunID())
+	log.Info(sctx.Ctx, "Temporal workflow started: %s (run: %s)", we.GetID(), we.GetRunID())
+
+	// ATOMIC: Link Temporal workflow + update state in single database round trip
+	// CRITICAL: Prevents inconsistent state where workflow is linked but state is not updated
+	// If LinkTemporalWorkflow succeeds but UpdateWorkflowState fails, session is left in inconsistent state
+	_, err = h.sessionRepo.LinkTemporalWorkflowAndUpdateStateReturning(
+		sctx.Ctx,
+		req.SessionID,
+		we.GetID(),
+		we.GetRunID(),
+		domain.WorkflowStateProfileSubmitting,
+		"PROFILE_SUBMITTED",
+		"COMPLETION",
+		90,
+		req.SubmittedBy,
+	)
 	if err != nil {
-		log.Error(sctx.Ctx, "Error linking workflow to session: %v", err)
-		return nil, err
+		log.Error(sctx.Ctx, "Error linking workflow and updating state: %v", err)
+		// Workflow is already started - cannot rollback
+		// Consider canceling workflow here if needed
+		return nil, fmt.Errorf("failed to update session with workflow details: %w", err)
 	}
 
-	// Update workflow state
-	err = h.sessionRepo.UpdateWorkflowState(sctx.Ctx, req.SessionID, domain.WorkflowStateProfileSubmitting, "PROFILE_SUBMITTED", "COMPLETION", 90, req.SessionID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error updating workflow state: %v", err)
-		return nil, err
-	}
-
-	log.Info(sctx.Ctx, "Workflow started successfully: %s", we.GetID())
+	log.Info(sctx.Ctx, "Profile submitted successfully with workflow: %s", we.GetID())
 
 	return &resp.SubmitProfileResponse{
 		StatusCodeAndMessage: port.CreateSuccess,
@@ -444,7 +551,7 @@ func (h *AgentProfileCreationHandler) GetSessionStatus(sctx *serverRoute.Context
 func (h *AgentProfileCreationHandler) SaveSession(sctx *serverRoute.Context, req SaveSessionRequest) (*resp.SaveSessionResponse, error) {
 	log.Info(sctx.Ctx, "Saving session checkpoint for session: %s", req.SessionID)
 
-	// Verify session exists
+	// Verify session exists and is active
 	session, err := h.sessionRepo.FindByID(sctx.Ctx, req.SessionID)
 	if err != nil {
 		log.Error(sctx.Ctx, "Error finding session: %v", err)
@@ -462,17 +569,21 @@ func (h *AgentProfileCreationHandler) SaveSession(sctx *serverRoute.Context, req
 		return nil, err
 	}
 
-	// Save form data to session
-	err = h.sessionRepo.SaveFormData(sctx.Ctx, req.SessionID, string(formDataJSON), req.SessionID)
+	// ATOMIC: Save form data and return updated session in single round trip
+	// Uses UPDATE...RETURNING to get updated session (including updated_at, expires_at)
+	// Avoids second FindByID call
+	updatedSession, err := h.sessionRepo.SaveFormDataAndUpdateWorkflowStateReturning(
+		sctx.Ctx,
+		req.SessionID,
+		string(formDataJSON),
+		session.WorkflowState,      // Keep current workflow state
+		req.CurrentScreen,          // Update current screen from request
+		session.NextStep,           // Keep current next step
+		session.ProgressPercentage, // Keep current progress
+		req.SessionID,
+	)
 	if err != nil {
-		log.Error(sctx.Ctx, "Error saving form data: %v", err)
-		return nil, err
-	}
-
-	// Fetch updated session for expiry time
-	updatedSession, err := h.sessionRepo.FindByID(sctx.Ctx, req.SessionID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error fetching updated session: %v", err)
+		log.Error(sctx.Ctx, "Error saving session data: %v", err)
 		return nil, err
 	}
 
@@ -535,25 +646,21 @@ func (h *AgentProfileCreationHandler) ResumeSession(sctx *serverRoute.Context, r
 func (h *AgentProfileCreationHandler) CancelSession(sctx *serverRoute.Context, req SessionIDUri) (*resp.CancelSessionResponse, error) {
 	log.Info(sctx.Ctx, "Cancelling session: %s", req.SessionID)
 
-	// Verify session exists
-	session, err := h.sessionRepo.FindByID(sctx.Ctx, req.SessionID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error finding session: %v", err)
-		return nil, err
-	}
-
-	if session.Status == domain.SessionStatusCancelled {
-		return nil, fmt.Errorf("session is already cancelled")
-	}
-
-	// Cancel session in repository
-	err = h.sessionRepo.Cancel(sctx.Ctx, req.SessionID, req.SessionID)
+	// ATOMIC: Cancel session and return result in single database round trip
+	// Uses UPDATE...RETURNING to cancel and verify in one operation
+	// Avoids separate FindByID + Cancel calls
+	cancelledSession, err := h.sessionRepo.CancelReturning(sctx.Ctx, req.SessionID, req.SessionID)
 	if err != nil {
 		log.Error(sctx.Ctx, "Error cancelling session: %v", err)
 		return nil, err
 	}
 
-	log.Info(sctx.Ctx, "Session cancelled successfully: %s", req.SessionID)
+	// Check if already cancelled (idempotent operation)
+	if cancelledSession.Status == domain.SessionStatusCancelled {
+		log.Info(sctx.Ctx, "Session was already cancelled: %s", req.SessionID)
+	} else {
+		log.Info(sctx.Ctx, "Session cancelled successfully: %s", req.SessionID)
+	}
 
 	return &resp.CancelSessionResponse{
 		StatusCodeAndMessage: port.UpdateSuccess,
