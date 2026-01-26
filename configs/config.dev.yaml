@@ -1,0 +1,17 @@
+# Development Environment Configuration
+# Overrides base config.yaml for development environment
+
+trace:
+  enabled: true  # Enable tracing in development
+
+db:
+  maxconns: 5  # Lower connection pool for development
+
+# Enable both cache layers in development for testing
+cache:
+  isredisenabled: false
+  islocalcacheenabled: true
+
+# Enable Temporal workflows in development
+temporal:
+  enabled: true  # Enable for WF-002: Agent Onboarding Workflow

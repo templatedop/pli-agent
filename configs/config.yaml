@@ -1,0 +1,83 @@
+# Agent Profile Management API - Base Configuration
+# This file contains default configuration values
+# Environment-specific overrides should be in config.{env}.yaml
+
+# Application name
+appname: "pli-agent-api"
+
+# Tracing configuration (OpenTelemetry)
+trace:
+  enabled: false  # Enable/disable distributed tracing
+  processor:
+    type: "otlp-grpc"  # Export format: otlp-grpc or otlp-http
+    options:
+      host: "localhost:4317"  # OpenTelemetry collector endpoint
+  sampler:
+    type: always-on  # Sampling strategy: always-on, always-off, parent-based-trace-id-ratio
+    options:
+      ratio: 0.1  # Sample 10% of traces (if using ratio sampler)
+
+# Cache configuration (Redis + Local)
+cache:
+  # Redis settings
+  redisserver: "localhost:6379"
+  redispassword: ""
+  redisdbindex: 1
+  redisexpirationtime: 20m
+
+  # Local cache settings
+  lccapacity: 10000              # Maximum number of entries
+  lcnumshards: 20                # Number of shards for concurrent access
+  lcttl: 2m                      # Time to live for cache entries
+  lcevictionpercentage: 10       # Percentage to evict when full
+  lcminrefreshdelay: 15m         # Minimum delay before refresh
+  lcmaxrefreshdelay: 30m         # Maximum delay before refresh
+  lcretrybasedelay: 1s           # Base delay for retries
+  lcbatchsize: 10                # Batch size for operations
+  lcbatchbuffertimeout: 30s      # Batch buffer timeout
+
+  # Enable/disable cache layers
+  isredisenabled: false
+  islocalcacheenabled: false
+
+# Database configuration (PostgreSQL)
+db:
+  username: "postgres"
+  password: "secret"
+  host: "localhost"
+  port: "5432"
+  database: "postgres"
+  schema: "public"
+
+  # Connection pool settings
+  maxconns: 10                # Maximum connections
+  minconns: 1                 # Minimum connections
+  maxconnlifetime: 30         # Max connection lifetime (minutes)
+  maxconnidletime: 10         # Max idle time (minutes)
+  healthcheckperiod: 5        # Health check interval (minutes)
+
+  # Query timeouts
+  QueryTimeoutLow: 2s         # Simple queries
+  QueryTimeoutMed: 5s         # Complex queries/aggregations
+  QueryTimeoutHigh: 10s       # Batch operations
+
+# Application info (for Swagger)
+info:
+  name: "Agent Profile Management API"
+  version: "1.0.0"
+  description: "API for managing insurance agent profiles, licenses, and status"
+
+# Temporal workflow configuration (for long-running processes)
+# WF-002: Agent Onboarding Workflow
+temporal:
+  enabled: false  # Enable when implementing workflows (set to true in dev/test)
+  hostport: "localhost:7233"
+  namespace: "default"
+  taskqueue: "agent-profile-task-queue"
+
+  # Worker configuration
+  worker:
+    max_concurrent_workflow: 100        # Max concurrent workflow executions
+    max_concurrent_activities: 200      # Max concurrent activity executions
+    max_concurrent_local_activities: 50 # Max concurrent local activity executions
+    max_pollers: 2                      # Number of pollers for task queue
