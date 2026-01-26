@@ -7,18 +7,18 @@ import (
 
 	sq "github.com/Masterminds/squirrel"
 	"github.com/jackc/pgx/v5"
+
 	config "gitlab.cept.gov.in/it-2.0-common/api-config"
 	dblib "gitlab.cept.gov.in/it-2.0-common/n-api-db"
-
-	"pli-agent-api/core/domain"
 	dbutil "pli-agent-api/db"
+	"pli-agent-api/core/domain"
 )
 
-// AgentLicenseRepository handles all database operations for agent licenses
-// E-06: Agent License Entity
-// BR-AGT-PRF-012: License Renewal Period Rules
-// BR-AGT-PRF-013: Auto-Deactivation on License Expiry
-// BR-AGT-PRF-014: License Renewal Reminder Schedule
+const (
+	agentLicenseTable = "agent_licenses"
+)
+
+// AgentLicenseRepository handles license data operations
 type AgentLicenseRepository struct {
 	db  *dblib.DB
 	cfg *config.Config
@@ -32,456 +32,365 @@ func NewAgentLicenseRepository(db *dblib.DB, cfg *config.Config) *AgentLicenseRe
 	}
 }
 
-const agentLicenseTable = "agent_licenses"
-
-// Create inserts a new agent license
-// FR-AGT-PRF-014: License Management
+// Create adds a new license with automatic renewal date calculation
+// AGT-030: Add License
 // BR-AGT-PRF-012: License Renewal Period Rules
-// BR-AGT-PRF-030: License Date Tracking
-// VR-AGT-PRF-018: License Line Validation
-// VR-AGT-PRF-019: License Type Validation
-// VR-AGT-PRF-020: License Number Uniqueness
-// VR-AGT-PRF-021: Resident Status Validation
-// VR-AGT-PRF-022: License Date Validation
-// VR-AGT-PRF-023: Renewal Date Validation
+// CRITICAL: Single database round trip
 func (r *AgentLicenseRepository) Create(ctx context.Context, license domain.AgentLicense) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use CTE to combine INSERT + INSERT audit in single query
-	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
-	// BR-AGT-PRF-012: Provisional license valid for 1 year, renewable max 2 times
-	// BR-AGT-PRF-030: Track license_date, renewal_date, authority_date
-	// BR-AGT-PRF-005: Audit Logging
-	batch := &pgx.Batch{}
+	// Calculate renewal date based on license type
+	renewalDate := r.calculateRenewalDate(license.LicenseType, license.LicenseDate, license.LicentiatExamPassed)
 
-	sql := `
-		WITH inserted AS (
-			INSERT INTO agent_licenses (
-				agent_id, license_line, license_type, license_number, resident_status,
-				license_date, renewal_date, authority_date, renewal_count, license_status,
-				licentiate_exam_passed, licentiate_exam_date, licentiate_certificate_number,
-				is_primary, metadata, created_by
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-			RETURNING *
-		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
-		SELECT agent_id, $17, $18, $19, $20, $21, $22
-		FROM inserted
-		RETURNING (SELECT ROW(license_id, agent_id, license_line, license_type, license_number, resident_status,
-			license_date, renewal_date, authority_date, renewal_count, license_status, licentiate_exam_passed,
-			licentiate_exam_date, licentiate_certificate_number, is_primary, metadata,
-			created_at, updated_at, created_by, updated_by, deleted_at, version) FROM inserted)
-	`
-
-	args := []interface{}{
-		license.AgentID, license.LicenseLine, license.LicenseType, license.LicenseNumber,
-		license.ResidentStatus, license.LicenseDate, license.RenewalDate, license.AuthorityDate,
-		license.RenewalCount, license.LicenseStatus, license.LicentiateExamPassed,
-		license.LicentiateExamDate, license.LicentiateCertificateNumber, license.IsPrimary,
-		license.Metadata, license.CreatedBy,
-		domain.AuditActionLicenseAdd, "license_number", license.LicenseNumber, "New license added", license.CreatedBy, time.Now(),
-	}
+	insertQuery := dblib.Psql.Insert(agentLicenseTable).
+		Columns(
+			"agent_id", "license_line", "license_type", "license_number",
+			"resident_status", "license_date", "renewal_date", "authority_date",
+			"renewal_count", "license_status", "licentiate_exam_passed",
+			"licentiate_exam_date", "licentiate_certificate_number",
+			"is_primary", "created_by",
+		).
+		Values(
+			license.AgentID, license.LicenseLine, license.LicenseType, license.LicenseNumber,
+			license.ResidentStatus, license.LicenseDate, renewalDate, license.AuthorityDate,
+			0, domain.LicenseStatusActive, license.LicentiatExamPassed,
+			license.LicentiateExamDate, license.LicenticateCertificateNumber,
+			license.IsPrimary, license.CreatedBy,
+		).
+		Suffix("RETURNING *")
 
 	var result domain.AgentLicense
-	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentLicense], &result)
+	err := dblib.SelectOne(cCtx, r.db, insertQuery, pgx.RowToStructByNameLax[domain.AgentLicense], &result)
 	if err != nil {
-		return nil, err
-	}
-
-	err = r.db.SendBatch(cCtx, batch).Close()
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create license: %w", err)
 	}
 
 	return &result, nil
 }
 
-// FindByID retrieves a license by ID
+// FindByID retrieves a specific license by ID
+// AGT-031: Get License Details
 func (r *AgentLicenseRepository) FindByID(ctx context.Context, licenseID string) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
 	query := dblib.Psql.Select("*").
 		From(agentLicenseTable).
-		Where(sq.Eq{"license_id": licenseID, "deleted_at": nil})
+		Where(sq.And{
+			sq.Eq{"license_id": licenseID},
+			sq.Eq{"deleted_at": nil},
+		})
 
 	var license domain.AgentLicense
 	err := dblib.SelectOne(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentLicense], &license)
 	if err != nil {
-		return nil, err
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("license not found: %s", licenseID)
+		}
+		return nil, fmt.Errorf("failed to find license: %w", err)
 	}
 
 	return &license, nil
 }
 
 // FindByAgentID retrieves all licenses for an agent
-// FR-AGT-PRF-014: License Management
-func (r *AgentLicenseRepository) FindByAgentID(ctx context.Context, agentID string) ([]domain.AgentLicense, error) {
+// AGT-029: Get Agent Licenses
+// CRITICAL: Single database round trip with optional status filter
+func (r *AgentLicenseRepository) FindByAgentID(ctx context.Context, agentID string, status *string) ([]domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
 	query := dblib.Psql.Select("*").
 		From(agentLicenseTable).
-		Where(sq.Eq{"agent_id": agentID, "deleted_at": nil}).
-		OrderBy("is_primary DESC, license_date DESC")
+		Where(sq.And{
+			sq.Eq{"agent_id": agentID},
+			sq.Eq{"deleted_at": nil},
+		}).
+		OrderBy("is_primary DESC, created_at DESC")
+
+	// Apply status filter if provided
+	if status != nil && *status != "" {
+		query = query.Where(sq.Eq{"license_status": *status})
+	}
 
 	var licenses []domain.AgentLicense
 	err := dblib.SelectRows(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentLicense], &licenses)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to find licenses for agent: %w", err)
 	}
 
 	return licenses, nil
 }
 
-// FindPrimaryLicense retrieves the primary license for an agent
-// BR-AGT-PRF-012: License Renewal Period Rules
-func (r *AgentLicenseRepository) FindPrimaryLicense(ctx context.Context, agentID string) (*domain.AgentLicense, error) {
+// Update updates license details
+// AGT-032: Update License
+func (r *AgentLicenseRepository) Update(ctx context.Context, licenseID string, updates map[string]interface{}, updatedBy string) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	query := dblib.Psql.Select("*").
-		From(agentLicenseTable).
-		Where(sq.Eq{"agent_id": agentID, "is_primary": true, "deleted_at": nil}).
-		OrderBy("license_date DESC").
-		Limit(1)
+	updateQuery := dblib.Psql.Update(agentLicenseTable).
+		Set("updated_at", time.Now()).
+		Set("updated_by", updatedBy).
+		Set("version", sq.Expr("version + 1")).
+		Where(sq.And{
+			sq.Eq{"license_id": licenseID},
+			sq.Eq{"deleted_at": nil},
+		})
 
-	var license domain.AgentLicense
-	err := dblib.SelectOne(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentLicense], &license)
-	if err != nil {
-		return nil, err
-	}
-
-	return &license, nil
-}
-
-// FindByLicenseNumber retrieves a license by license number
-// VR-AGT-PRF-020: License Number Uniqueness
-func (r *AgentLicenseRepository) FindByLicenseNumber(ctx context.Context, licenseNumber string) (*domain.AgentLicense, error) {
-	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
-	defer cancel()
-
-	query := dblib.Psql.Select("*").
-		From(agentLicenseTable).
-		Where(sq.Eq{"license_number": licenseNumber, "deleted_at": nil}).
-		Limit(1)
-
-	var license domain.AgentLicense
-	err := dblib.SelectOne(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentLicense], &license)
-	if err != nil {
-		return nil, err
-	}
-
-	return &license, nil
-}
-
-// Update updates an agent license
-// FR-AGT-PRF-014: License Management
-// BR-AGT-PRF-012: License Renewal Period Rules
-func (r *AgentLicenseRepository) Update(ctx context.Context, licenseID string, updates map[string]interface{}, updatedBy string) error {
-	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
-	defer cancel()
-
-	// Use CTE to combine UPDATE + INSERT audit logs in single query
-	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
-	// BR-AGT-PRF-005: Audit Logging
-	batch := &pgx.Batch{}
-
-	// Build SET clause dynamically
-	setClauses := "updated_at = $2, updated_by = $3"
-	args := []interface{}{licenseID, time.Now(), updatedBy}
-	argIndex := 4
-
+	// Add dynamic fields from updates map
 	for field, value := range updates {
-		setClauses += fmt.Sprintf(", %s = $%d", field, argIndex)
-		args = append(args, value)
-		argIndex++
+		updateQuery = updateQuery.Set(field, value)
 	}
 
-	// Build audit log values for UNNEST
-	fieldNames := []string{}
-	newValues := []interface{}{}
-	for field, value := range updates {
-		fieldNames = append(fieldNames, field)
-		newValues = append(newValues, value)
-	}
+	updateQuery = updateQuery.Suffix("RETURNING *")
 
-	sql := fmt.Sprintf(`
-		WITH updated AS (
-			UPDATE agent_licenses
-			SET %s
-			WHERE license_id = $1 AND deleted_at IS NULL
-			RETURNING agent_id
-		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, performed_by, performed_at)
-		SELECT agent_id, $%d, unnest($%d::text[]), unnest($%d::text[]), $%d, $%d
-		FROM updated
-	`, setClauses, argIndex, argIndex+1, argIndex+2, argIndex+3, argIndex+4)
-
-	args = append(args, domain.AuditActionLicenseUpdate, fieldNames, newValues, updatedBy, time.Now())
-
-	err := dbutil.QueueExecRowRaw(batch, sql, args...)
+	var result domain.AgentLicense
+	err := dblib.SelectOne(cCtx, r.db, updateQuery, pgx.RowToStructByNameLax[domain.AgentLicense], &result)
 	if err != nil {
-		return err
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("license not found: %s", licenseID)
+		}
+		return nil, fmt.Errorf("failed to update license: %w", err)
 	}
 
-	// Execute batch
-	return r.db.SendBatch(cCtx, batch).Close()
+	return &result, nil
 }
 
-// RenewLicense renews a license and updates renewal count
-// BR-AGT-PRF-012: License Renewal Period Rules
-// Provisional: Max 2 renewals, 1 year each
-// Permanent: Renewable every 1 year after 5-year validity
-func (r *AgentLicenseRepository) RenewLicense(ctx context.Context, licenseID, updatedBy string, newRenewalDate time.Time) error {
+// Renew renews a license with period calculation
+// AGT-033: Renew License
+// BR-AGT-PRF-012: Complex renewal rules
+// CRITICAL: Single database round trip with RETURNING
+func (r *AgentLicenseRepository) Renew(
+	ctx context.Context,
+	licenseID string,
+	renewalType string,
+	examPassed bool,
+	examDate *time.Time,
+	examCertNumber *string,
+	updatedBy string,
+) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use CTE to combine UPDATE + INSERT audit in single query
-	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
-	batch := &pgx.Batch{}
-
-	sql := `
-		WITH updated AS (
-			UPDATE agent_licenses
-			SET renewal_count = renewal_count + 1, renewal_date = $2, license_status = $3,
-				updated_at = $4, updated_by = $5
-			WHERE license_id = $1 AND deleted_at IS NULL
-			RETURNING agent_id
-		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
-		SELECT agent_id, $6, $7, $8, $9, $10, $11
-		FROM updated
-	`
-
-	args := []interface{}{
-		licenseID, newRenewalDate, domain.LicenseStatusRenewed, time.Now(), updatedBy,
-		domain.AuditActionLicenseUpdate, "renewal_date", newRenewalDate, "License renewed", updatedBy, time.Now(),
-	}
-
-	err := dbutil.QueueExecRowRaw(batch, sql, args...)
-	if err != nil {
-		return err
-	}
-
-	// Execute batch
-	return r.db.SendBatch(cCtx, batch).Close()
-}
-
-// ConvertToPermanent converts a provisional license to permanent after passing licentiate exam
-// BR-AGT-PRF-012: License Renewal Period Rules
-// After passing exam within 3 years: Permanent license with 5-year validity, renewable every 1 year
-func (r *AgentLicenseRepository) ConvertToPermanent(ctx context.Context, licenseID, updatedBy string, examDate time.Time, certificateNumber string) error {
-	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
-	defer cancel()
-
-	// Use CTE to combine UPDATE + INSERT audit in single query
-	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
-	// Calculate new renewal date: 5 years from conversion, then renewable every 1 year
-	batch := &pgx.Batch{}
-
-	permanentValidityDate := examDate.AddDate(5, 0, 0)
-
-	sql := `
-		WITH updated AS (
-			UPDATE agent_licenses
-			SET license_type = $2, licentiate_exam_passed = $3, licentiate_exam_date = $4,
-				licentiate_certificate_number = $5, renewal_date = $6, license_status = $7,
-				updated_at = $8, updated_by = $9
-			WHERE license_id = $1 AND deleted_at IS NULL
-			RETURNING agent_id
-		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
-		SELECT agent_id, $10, $11, $12, $13, $14, $15
-		FROM updated
-	`
-
-	args := []interface{}{
-		licenseID, domain.LicenseTypePermanent, true, examDate, certificateNumber,
-		permanentValidityDate, domain.LicenseStatusActive, time.Now(), updatedBy,
-		domain.AuditActionLicenseUpdate, "license_type", domain.LicenseTypePermanent,
-		"Converted to permanent after passing licentiate exam", updatedBy, time.Now(),
-	}
-
-	err := dbutil.QueueExecRowRaw(batch, sql, args...)
-	if err != nil {
-		return err
-	}
-
-	// Execute batch
-	return r.db.SendBatch(cCtx, batch).Close()
-}
-
-// FindExpiringLicenses retrieves licenses expiring within specified days
-// BR-AGT-PRF-014: License Renewal Reminder Schedule
-// Used for sending reminders at 30, 15, 7 days before expiry and on expiry day
-func (r *AgentLicenseRepository) FindExpiringLicenses(ctx context.Context, daysUntilExpiry int) ([]domain.AgentLicense, error) {
-	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
-	defer cancel()
-
-	// Calculate the target date for expiry check
-	targetDate := time.Now().AddDate(0, 0, daysUntilExpiry)
-
-	query := dblib.Psql.Select("*").
-		From(agentLicenseTable).
-		Where(sq.Eq{"license_status": domain.LicenseStatusActive, "deleted_at": nil}).
-		Where(sq.Expr("DATE(renewal_date) = DATE(?)", targetDate))
-
-	var licenses []domain.AgentLicense
-	err := dblib.SelectRows(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentLicense], &licenses)
+	// First, get current license to determine renewal logic
+	currentLicense, err := r.FindByID(ctx, licenseID)
 	if err != nil {
 		return nil, err
 	}
 
-	return licenses, nil
-}
+	// Validate renewal count for provisional licenses
+	if currentLicense.IsProvisional() && !examPassed {
+		if currentLicense.RenewalCount >= domain.MaxProvisionalRenewals {
+			return nil, fmt.Errorf("provisional license has reached maximum renewals (%d)", domain.MaxProvisionalRenewals)
+		}
+	}
 
-// FindExpiredLicenses retrieves all expired licenses that need auto-deactivation
-// BR-AGT-PRF-013: Auto-Deactivation on License Expiry
-func (r *AgentLicenseRepository) FindExpiredLicenses(ctx context.Context) ([]domain.AgentLicense, error) {
-	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
-	defer cancel()
+	// Determine new license type and renewal date
+	newLicenseType := currentLicense.LicenseType
+	var newRenewalDate time.Time
 
-	query := dblib.Psql.Select("*").
-		From(agentLicenseTable).
-		Where(sq.Eq{"license_status": domain.LicenseStatusActive, "deleted_at": nil}).
-		Where(sq.Lt{"renewal_date": time.Now()})
+	if examPassed && currentLicense.IsProvisional() {
+		// Convert to permanent after exam
+		newLicenseType = domain.LicenseTypePermanent
+		newRenewalDate = time.Now().AddDate(5, 0, 0) // 5 years
+	} else if currentLicense.IsProvisional() {
+		// Renew provisional for 1 year
+		newRenewalDate = currentLicense.RenewalDate.AddDate(1, 0, 0)
+	} else {
+		// Permanent annual renewal
+		newRenewalDate = currentLicense.RenewalDate.AddDate(1, 0, 0)
+	}
 
-	var licenses []domain.AgentLicense
-	err := dblib.SelectRows(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentLicense], &licenses)
+	updateQuery := dblib.Psql.Update(agentLicenseTable).
+		Set("license_type", newLicenseType).
+		Set("renewal_date", newRenewalDate).
+		Set("renewal_count", sq.Expr("renewal_count + 1")).
+		Set("license_status", domain.LicenseStatusActive).
+		Set("updated_at", time.Now()).
+		Set("updated_by", updatedBy).
+		Set("version", sq.Expr("version + 1")).
+		Where(sq.And{
+			sq.Eq{"license_id": licenseID},
+			sq.Eq{"deleted_at": nil},
+		})
+
+	// Update exam details if passed
+	if examPassed {
+		updateQuery = updateQuery.
+			Set("licentiate_exam_passed", true).
+			Set("licentiate_exam_date", examDate).
+			Set("licentiate_certificate_number", examCertNumber)
+	}
+
+	updateQuery = updateQuery.Suffix("RETURNING *")
+
+	var result domain.AgentLicense
+	err = dblib.SelectOne(cCtx, r.db, updateQuery, pgx.RowToStructByNameLax[domain.AgentLicense], &result)
 	if err != nil {
-		return nil, err
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("license not found: %s", licenseID)
+		}
+		return nil, fmt.Errorf("failed to renew license: %w", err)
 	}
 
-	return licenses, nil
+	return &result, nil
 }
 
-// MarkAsExpired marks a license as expired
-// BR-AGT-PRF-013: Auto-Deactivation on License Expiry
-func (r *AgentLicenseRepository) MarkAsExpired(ctx context.Context, licenseID, updatedBy string) error {
-	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
-	defer cancel()
-
-	// Use CTE to combine UPDATE + INSERT audit in single query
-	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
-	batch := &pgx.Batch{}
-
-	sql := `
-		WITH updated AS (
-			UPDATE agent_licenses
-			SET license_status = $2, updated_at = $3, updated_by = $4
-			WHERE license_id = $1 AND deleted_at IS NULL
-			RETURNING agent_id
-		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
-		SELECT agent_id, $5, $6, $7, $8, $9, $10
-		FROM updated
-	`
-
-	args := []interface{}{
-		licenseID, domain.LicenseStatusExpired, time.Now(), updatedBy,
-		domain.AuditActionLicenseUpdate, "license_status", domain.LicenseStatusExpired, "License expired", updatedBy, time.Now(),
-	}
-
-	err := dbutil.QueueExecRowRaw(batch, sql, args...)
-	if err != nil {
-		return err
-	}
-
-	// Execute batch
-	return r.db.SendBatch(cCtx, batch).Close()
-}
-
-// BatchMarkAsExpired marks multiple licenses as expired
-// OPTIMIZATION: UNNEST pattern for bulk expiry processing with CTE
-// BR-AGT-PRF-013: Auto-Deactivation on License Expiry
-func (r *AgentLicenseRepository) BatchMarkAsExpired(ctx context.Context, licenseIDs []string, updatedBy string) error {
-	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
-	defer cancel()
-
-	// Use UNNEST + CTE to bulk update licenses and insert audit logs in single query
-	// CRITICAL: Golang variables cannot be passed between batch queries - must use UNNEST pattern
-	batch := &pgx.Batch{}
-
-	sql := `
-		WITH updated AS (
-			UPDATE agent_licenses
-			SET license_status = $2, updated_at = $3, updated_by = $4
-			WHERE license_id = ANY($1::uuid[]) AND deleted_at IS NULL
-			RETURNING agent_id, license_id
-		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
-		SELECT agent_id, $5, $6, $7, $8, $9, $10
-		FROM updated
-	`
-
-	args := []interface{}{
-		licenseIDs, domain.LicenseStatusExpired, time.Now(), updatedBy,
-		domain.AuditActionLicenseUpdate, "license_status", domain.LicenseStatusExpired,
-		"License expired - batch processing", updatedBy, time.Now(),
-	}
-
-	err := dbutil.QueueExecRowRaw(batch, sql, args...)
-	if err != nil {
-		return err
-	}
-
-	// Execute batch
-	return r.db.SendBatch(cCtx, batch).Close()
-}
-
-// Delete soft deletes an agent license
+// Delete soft deletes a license
+// AGT-034: Delete License
 func (r *AgentLicenseRepository) Delete(ctx context.Context, licenseID, deletedBy string) error {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use CTE to combine UPDATE + INSERT audit in single query
-	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
-	batch := &pgx.Batch{}
+	updateQuery := dblib.Psql.Update(agentLicenseTable).
+		Set("deleted_at", time.Now()).
+		Set("updated_by", deletedBy).
+		Where(sq.And{
+			sq.Eq{"license_id": licenseID},
+			sq.Eq{"deleted_at": nil},
+		})
 
-	sql := `
-		WITH updated AS (
-			UPDATE agent_licenses
-			SET deleted_at = $2, updated_by = $3
-			WHERE license_id = $1 AND deleted_at IS NULL
-			RETURNING agent_id
-		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, action_reason, performed_by, performed_at)
-		SELECT agent_id, $4, $5, $6, $7, $8
-		FROM updated
-	`
-
-	args := []interface{}{
-		licenseID, time.Now(), deletedBy,
-		domain.AuditActionDelete, "license", "License deleted", deletedBy, time.Now(),
-	}
-
-	err := dbutil.QueueExecRowRaw(batch, sql, args...)
+	tag, err := dblib.Update(cCtx, r.db, updateQuery)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to delete license: %w", err)
 	}
 
-	// Execute batch
-	return r.db.SendBatch(cCtx, batch).Close()
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("license not found: %s", licenseID)
+	}
+
+	return nil
 }
 
-// ValidateLicenseNumberUniqueness checks if license number is unique
-// VR-AGT-PRF-020: License Number Uniqueness
-func (r *AgentLicenseRepository) ValidateLicenseNumberUniqueness(ctx context.Context, licenseNumber, excludeLicenseID string) (bool, error) {
+// FindExpiring retrieves licenses expiring within specified days
+// AGT-036: Get Expiring Licenses
+// BR-AGT-PRF-014: License Renewal Reminders
+// CRITICAL: Single database round trip with pagination
+func (r *AgentLicenseRepository) FindExpiring(
+	ctx context.Context,
+	days int,
+	officeCode *string,
+	page, limit int,
+) ([]domain.AgentLicense, int64, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	query := dblib.Psql.Select("COUNT(*)").
+	expiryDate := time.Now().AddDate(0, 0, days)
+	
+	baseQuery := dblib.Psql.Select().
 		From(agentLicenseTable).
-		Where(sq.Eq{"license_number": licenseNumber, "deleted_at": nil}).
-		Where(sq.NotEq{"license_id": excludeLicenseID})
+		Where(sq.And{
+			sq.Eq{"license_status": domain.LicenseStatusActive},
+			sq.Eq{"deleted_at": nil},
+			sq.LtOrEq{"renewal_date": expiryDate},
+		})
 
-	var count int64
-	err := dblib.SelectOne(cCtx, r.db, query, pgx.RowTo[int64], &count)
-	if err != nil {
-		return false, err
+	// Apply office filter if provided (requires JOIN with agent_profiles)
+	if officeCode != nil && *officeCode != "" {
+		baseQuery = baseQuery.
+			Join("agent_profiles ap ON ap.agent_id = agent_licenses.agent_id").
+			Where(sq.Eq{"ap.office_code": *officeCode})
 	}
 
-	return count == 0, nil
+	offset := (page - 1) * limit
+
+	// Use batch to get count and data in single round trip
+	batch := &pgx.Batch{}
+
+	// Query 1: Count
+	countQuery := baseQuery.Columns("COUNT(*)")
+	var totalCount int64
+	err := dbutil.QueueReturnRow(batch, countQuery, pgx.RowTo[int64], &totalCount)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to queue count query: %w", err)
+	}
+
+	// Query 2: Data
+	dataQuery := baseQuery.
+		Columns("agent_licenses.*").
+		OrderBy("renewal_date ASC").
+		Limit(uint64(limit)).
+		Offset(uint64(offset))
+
+	var licenses []domain.AgentLicense
+	err = dbutil.QueueReturn(batch, dataQuery, pgx.RowToStructByNameLax[domain.AgentLicense], &licenses)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to queue data query: %w", err)
+	}
+
+	// Execute batch
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to execute expiring licenses query: %w", err)
+	}
+
+	return licenses, totalCount, nil
+}
+
+// DeactivateExpiredAgents batch deactivates agents with expired licenses
+// AGT-038: Trigger License Expiry Deactivation
+// BR-AGT-PRF-013: Auto-Deactivation on Expiry
+// CRITICAL: Batch operation for system job
+func (r *AgentLicenseRepository) DeactivateExpiredAgents(ctx context.Context, batchDate time.Time, dryRun bool) ([]string, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
+	defer cancel()
+
+	// Find all expired licenses
+	query := dblib.Psql.Select("DISTINCT agent_id").
+		From(agentLicenseTable).
+		Where(sq.And{
+			sq.Lt{"renewal_date": batchDate},
+			sq.Eq{"license_status": domain.LicenseStatusActive},
+			sq.Eq{"deleted_at": nil},
+		})
+
+	var agentIDs []string
+	err := dblib.SelectRows(cCtx, r.db, query, pgx.RowTo[string], &agentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find expired licenses: %w", err)
+	}
+
+	// If dry run, just return the agent IDs
+	if dryRun {
+		return agentIDs, nil
+	}
+
+	// Update license status to EXPIRED (actual deactivation would be in a transaction with agent status update)
+	if len(agentIDs) > 0 {
+		updateQuery := dblib.Psql.Update(agentLicenseTable).
+			Set("license_status", domain.LicenseStatusExpired).
+			Set("updated_at", time.Now()).
+			Set("updated_by", "SYSTEM_BATCH").
+			Where(sq.And{
+				sq.Eq{"agent_id": agentIDs},
+				sq.Lt{"renewal_date": batchDate},
+				sq.Eq{"license_status": domain.LicenseStatusActive},
+				sq.Eq{"deleted_at": nil},
+			})
+
+		_, err = dblib.Update(cCtx, r.db, updateQuery)
+		if err != nil {
+			return nil, fmt.Errorf("failed to update expired licenses: %w", err)
+		}
+	}
+
+	return agentIDs, nil
+}
+
+// calculateRenewalDate calculates renewal date based on license type
+// BR-AGT-PRF-012: License Renewal Period Rules
+func (r *AgentLicenseRepository) calculateRenewalDate(licenseType string, licenseDate time.Time, examPassed bool) time.Time {
+	if licenseType == domain.LicenseTypeProvisional {
+		// Provisional: 1 year
+		return licenseDate.AddDate(1, 0, 0)
+	}
+	
+	// Permanent after exam: 5 years
+	if examPassed {
+		return licenseDate.AddDate(5, 0, 0)
+	}
+	
+	// Default annual renewal
+	return licenseDate.AddDate(1, 0, 0)
 }

@@ -185,3 +185,77 @@ type GetAuditHistoryRequest struct {
 	Page    int    `query:"page" validate:"omitempty,min=1"`
 	Limit   int    `query:"limit" validate:"omitempty,min=1,max=100"`
 }
+
+// ========================================================================
+// LICENSE MANAGEMENT API REQUESTS (AGT-029 to AGT-038)
+// ========================================================================
+
+// LicenseIDUri represents license ID in URI
+type LicenseIDUri struct {
+	LicenseID string `uri:"license_id" validate:"required,uuid4"`
+}
+
+// GetAgentLicensesQuery filters for agent licenses list
+// AGT-029: Get Agent Licenses
+type GetAgentLicensesQuery struct {
+	Status string `query:"status" validate:"omitempty,oneof=ACTIVE EXPIRED RENEWED"`
+}
+
+// AddLicenseRequest represents request to add new license
+// AGT-030: Add License
+// BR-AGT-PRF-012: License Renewal Period Rules
+// VR-AGT-PRF-031 to VR-AGT-PRF-036
+type AddLicenseRequest struct {
+	AgentID                      string  `uri:"agent_id" validate:"required,uuid4"`
+	LicenseLine                  string  `json:"license_line" validate:"required,oneof=Life General"`
+	LicenseType                  string  `json:"license_type" validate:"required,oneof=Provisional Permanent"`
+	LicenseNumber                string  `json:"license_number" validate:"required"`
+	ResidentStatus               string  `json:"resident_status" validate:"required,oneof=Resident Non_Resident"`
+	LicenseDate                  string  `json:"license_date" validate:"required"` // format: date
+	AuthorityDate                string  `json:"authority_date" validate:"required"` // format: date
+	LicentiateExamPassed         bool    `json:"licentiate_exam_passed"`
+	IsPrimary                    bool    `json:"is_primary"`
+}
+
+// UpdateLicenseRequest represents request to update license
+// AGT-032: Update License
+type UpdateLicenseRequest struct {
+	AgentID                      string  `uri:"agent_id" validate:"required,uuid4"`
+	LicenseID                    string  `uri:"license_id" validate:"required,uuid4"`
+	LicenseNumber                *string `json:"license_number" validate:"omitempty"`
+	ResidentStatus               *string `json:"resident_status" validate:"omitempty,oneof=Resident Non_Resident"`
+	AuthorityDate                *string `json:"authority_date" validate:"omitempty"` // format: date
+	IsPrimary                    *bool   `json:"is_primary" validate:"omitempty"`
+	UpdatedBy                    string  `json:"updated_by" validate:"required"`
+}
+
+// RenewLicenseRequest represents request to renew license
+// AGT-033: Renew License
+// BR-AGT-PRF-012: Complex renewal rules
+type RenewLicenseRequest struct {
+	AgentID               string  `uri:"agent_id" validate:"required,uuid4"`
+	LicenseID             string  `uri:"license_id" validate:"required,uuid4"`
+	RenewalType           string  `json:"renewal_type" validate:"required,oneof=PROVISIONAL POST_EXAM ANNUAL"`
+	LicentiateExamPassed  bool    `json:"licentiate_exam_passed"`
+	ExamDate              *string `json:"exam_date" validate:"omitempty"` // format: date
+	ExamCertificateNumber *string `json:"exam_certificate_number" validate:"omitempty"`
+	RenewedBy             string  `json:"renewed_by" validate:"required"`
+}
+
+// GetExpiringLicensesQuery filters for expiring licenses
+// AGT-036: Get Expiring Licenses
+// BR-AGT-PRF-014: License Renewal Reminders
+type GetExpiringLicensesQuery struct {
+	Days       int    `query:"days" validate:"omitempty,min=1,max=365"`
+	OfficeCode string `query:"office_code" validate:"omitempty"`
+	Page       int    `query:"page" validate:"omitempty,min=1"`
+	Limit      int    `query:"limit" validate:"omitempty,min=1,max=100"`
+}
+
+// TriggerExpiryDeactivationRequest triggers batch job to deactivate expired licenses
+// AGT-038: Trigger License Expiry Deactivation
+// BR-AGT-PRF-013: Auto-Deactivation on Expiry
+type TriggerExpiryDeactivationRequest struct {
+	BatchDate string `json:"batch_date" validate:"required"` // format: date
+	DryRun    bool   `json:"dry_run"`
+}

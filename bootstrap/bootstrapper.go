@@ -26,6 +26,7 @@ var FxRepo = fx.Module(
 		repo.NewAgentEmailRepository,
 		repo.NewAgentBankDetailsRepository,
 		repo.NewAgentLicenseRepository,
+		repo.NewLicenseReminderRepository,     // Phase 7: License reminders
 		repo.NewAgentAuditLogRepository,
 		repo.NewAgentProfileSessionRepository, // Phase 5: Session management
 		repo.NewApprovalRequestRepository,     // Phase 6: Approval workflow
@@ -71,7 +72,13 @@ var FxHandler = fx.Module(
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// TODO: PHASE 7 - Add license management handlers
+		// PHASE 7: License Management (AGT-029 to AGT-038)
+		// License Management Handler - CRUD, Renewal, Expiry, Reminders
+		fx.Annotate(
+			handler.NewLicenseManagementHandler,
+			fx.As(new(serverHandler.Handler)),
+			fx.ResultTags(serverHandler.ServerControllersGroupTag),
+		),
 		// TODO: PHASE 8 - Add status management handlers
 		// TODO: PHASE 9 - Add search and dashboard handlers
 		// TODO: PHASE 10 - Add batch and webhook handlers
