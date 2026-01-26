@@ -1,0 +1,12 @@
+# Test Environment Configuration
+# Overrides base config.yaml for test environment
+
+trace:
+  enabled: false  # Disable tracing in tests
+
+db:
+  maxconns: 3  # Minimal connections for tests
+
+cache:
+  isredisenabled: false
+  islocalcacheenabled: false  # Disable cache in tests
