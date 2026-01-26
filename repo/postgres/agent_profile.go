@@ -786,28 +786,30 @@ func (r *AgentProfileRepository) GetAgentProfileWithDetails(ctx context.Context,
 	`
 
 	// Use struct to receive the JSON strings
-	var result struct {
+	type ProfileResult struct {
 		Profile   string `db:"profile"`
 		Addresses string `db:"addresses"`
 		Contacts  string `db:"contacts"`
 		Emails    string `db:"emails"`
 	}
 
-	// Execute with dblib.SelectOne
+	// Execute with dblib.SelectRows (raw SQL, non-Squirrel)
 	rows, err := r.db.Query(cCtx, sql, agentID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get agent profile: %w", err)
 	}
-	defer rows.Close()
 
-	if !rows.Next() {
+	// Use dblib.SelectRows pattern
+	results, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[ProfileResult])
+	if err != nil {
+		return nil, fmt.Errorf("failed to collect profile data: %w", err)
+	}
+
+	if len(results) == 0 {
 		return nil, fmt.Errorf("agent not found: %s", agentID)
 	}
 
-	err = rows.Scan(&result.Profile, &result.Addresses, &result.Contacts, &result.Emails)
-	if err != nil {
-		return nil, fmt.Errorf("failed to scan profile data: %w", err)
-	}
+	result := results[0]
 
 	// Build response map
 	responseMap := map[string]interface{}{
@@ -866,20 +868,18 @@ func (r *AgentProfileRepository) GetAgentUpdateFormData(ctx context.Context, age
 		return nil, fmt.Errorf("unsupported section: %s", section)
 	}
 
-	// Use dblib pattern for single row query
-	var formDataJSON string
+	// Execute with dblib.SelectOne pattern (raw SQL)
 	rows, err := r.db.Query(cCtx, sql, agentID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get update form data: %w", err)
 	}
-	defer rows.Close()
 
-	if !rows.Next() {
-		return nil, fmt.Errorf("agent not found or no data for section: %s", section)
-	}
-
-	err = rows.Scan(&formDataJSON)
+	// Use pgx.CollectOneRow for single row query
+	formDataJSON, err := pgx.CollectOneRow(rows, pgx.RowTo[string])
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("agent not found or no data for section: %s", section)
+		}
 		return nil, fmt.Errorf("failed to scan form data: %w", err)
 	}
 
@@ -936,37 +936,114 @@ func (r *AgentProfileRepository) UpdateAgentPersonalInfoReturning(
 	return &result, nil
 }
 
-// CreateApprovalRequestAndUpdateProfileReturning creates approval request for pending update
-// Used when critical fields require approval
-// CRITICAL: Prepares for approval workflow
+// CreateApprovalRequestWithChanges handles both approval and direct update cases
+// CRITICAL: Single database round trip using batch
+// If requiresApproval: Creates approval request
+// If !requiresApproval: Directly updates profile based on section
 func (r *AgentProfileRepository) CreateApprovalRequestWithChanges(
 	ctx context.Context,
 	agentID, section string,
 	changes map[string]interface{},
 	requestedBy string,
-) (string, error) {
+	requiresApproval bool,
+) (approvalRequestID *string, updatedProfile *domain.AgentProfile, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Marshal changes to JSON
-	changesJSON, err := json.Marshal(changes)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal changes: %w", err)
+	batch := &pgx.Batch{}
+
+	if requiresApproval {
+		// Case 1: Create approval request
+		changesJSON, err := json.Marshal(changes)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal changes: %w", err)
+		}
+
+		insertQuery := dblib.Psql.Insert("approval_requests").
+			Columns("agent_id", "section", "requested_changes", "requested_by", "requested_at", "status").
+			Values(agentID, section, string(changesJSON), requestedBy, time.Now(), "PENDING").
+			Suffix("RETURNING approval_request_id")
+
+		var approvalID string
+		err = dbutil.QueueReturnRow(batch, insertQuery, pgx.RowTo[string], &approvalID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to queue approval request: %w", err)
+		}
+
+		// Execute batch
+		err = r.db.SendBatch(cCtx, batch).Close()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create approval request: %w", err)
+		}
+
+		return &approvalID, nil, nil
+
+	} else {
+		// Case 2: Direct update based on section
+		var profile domain.AgentProfile
+
+		switch section {
+		case "personal_info":
+			// Extract update map from changes
+			updateMap := make(map[string]interface{})
+			for field, changeObj := range changes {
+				if change, ok := changeObj.(map[string]interface{}); ok {
+					if newValue, exists := change["new_value"]; exists {
+						updateMap[field] = newValue
+					}
+				} else {
+					// If not in change object format, use directly
+					updateMap[field] = changeObj
+				}
+			}
+
+			// Build dynamic UPDATE query with Squirrel
+			updateQuery := dblib.Psql.Update(agentProfileTable).
+				Set("updated_at", time.Now()).
+				Set("updated_by", requestedBy).
+				Set("version", sq.Expr("version + 1")).
+				Where(sq.And{
+					sq.Eq{"agent_id": agentID},
+					sq.Eq{"deleted_at": nil},
+				})
+
+			// Add dynamic fields from updates map
+			for field, value := range updateMap {
+				updateQuery = updateQuery.Set(field, value)
+			}
+
+			// Add RETURNING clause
+			updateQuery = updateQuery.Suffix("RETURNING *")
+
+			// Queue the update query
+			err := dbutil.QueueReturnRow(batch, updateQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &profile)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to queue profile update: %w", err)
+			}
+
+		case "address":
+			// TODO: Implement address update
+			return nil, nil, fmt.Errorf("address update not implemented yet")
+
+		case "contact":
+			// TODO: Implement contact update
+			return nil, nil, fmt.Errorf("contact update not implemented yet")
+
+		default:
+			return nil, nil, fmt.Errorf("unsupported section: %s", section)
+		}
+
+		// Execute batch
+		err := r.db.SendBatch(cCtx, batch).Close()
+		if err != nil {
+			if err == pgx.ErrNoRows {
+				return nil, nil, fmt.Errorf("agent not found: %s", agentID)
+			}
+			return nil, nil, fmt.Errorf("failed to update profile: %w", err)
+		}
+
+		return nil, &profile, nil
 	}
-
-	// Insert approval request
-	insertQuery := dblib.Psql.Insert("approval_requests").
-		Columns("agent_id", "section", "requested_changes", "requested_by", "requested_at", "status").
-		Values(agentID, section, string(changesJSON), requestedBy, time.Now(), "PENDING").
-		Suffix("RETURNING approval_request_id")
-
-	var approvalRequestID string
-	err = dblib.SelectOne(cCtx, r.db, insertQuery, pgx.RowTo[string], &approvalRequestID)
-	if err != nil {
-		return "", fmt.Errorf("failed to create approval request: %w", err)
-	}
-
-	return approvalRequestID, nil
 }
 
 // ApproveAndApplyProfileChangesReturning approves request and applies changes in single transaction

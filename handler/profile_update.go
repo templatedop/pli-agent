@@ -235,22 +235,24 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 		}
 	}
 
-	if requiresApproval {
-		// Create approval request using combined repository method
-		// CRITICAL: Single database round trip
-		approvalRequestID, err := h.profileRepo.CreateApprovalRequestWithChanges(
-			sctx.Ctx,
-			req.AgentID,
-			req.Section,
-			req.Changes,
-			req.UpdatedBy,
-		)
-		if err != nil {
-			log.Error(sctx.Ctx, "Error creating approval request: %v", err)
-			return nil, err
-		}
+	// Call repository method that handles both approval and direct update cases
+	// CRITICAL: Single database round trip using batch
+	approvalRequestID, updatedProfile, err := h.profileRepo.CreateApprovalRequestWithChanges(
+		sctx.Ctx,
+		req.AgentID,
+		req.Section,
+		req.Changes,
+		req.UpdatedBy,
+		requiresApproval,
+	)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error processing profile update: %v", err)
+		return nil, err
+	}
 
-		log.Info(sctx.Ctx, "Created approval request: %s", approvalRequestID)
+	// Build response based on whether approval was required
+	if requiresApproval {
+		log.Info(sctx.Ctx, "Created approval request: %s", *approvalRequestID)
 
 		return &resp.UpdateProfileResponse{
 			StatusCodeAndMessage: port.StatusCodeAndMessage{
@@ -258,44 +260,9 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 				Message:    "Update requires approval. Approval request created.",
 			},
 			ApprovalRequired:  true,
-			ApprovalRequestID: &approvalRequestID,
+			ApprovalRequestID: approvalRequestID,
 			Status:            "PENDING_APPROVAL",
 		}, nil
-	}
-
-	// Direct update without approval
-	var updatedProfile *domain.AgentProfile
-	var err error
-
-	switch req.Section {
-	case "personal_info":
-		// Extract update map from changes
-		updateMap := make(map[string]interface{})
-		for field, changeObj := range req.Changes {
-			if change, ok := changeObj.(map[string]interface{}); ok {
-				if newValue, exists := change["new_value"]; exists {
-					updateMap[field] = newValue
-				}
-			} else {
-				// If not in change object format, use directly
-				updateMap[field] = changeObj
-			}
-		}
-
-		// Atomic update with RETURNING
-		updatedProfile, err = h.profileRepo.UpdateAgentPersonalInfoReturning(
-			sctx.Ctx,
-			req.AgentID,
-			updateMap,
-			req.UpdatedBy,
-		)
-	default:
-		return nil, fmt.Errorf("section update not implemented: %s", req.Section)
-	}
-
-	if err != nil {
-		log.Error(sctx.Ctx, "Error updating profile section: %v", err)
-		return nil, err
 	}
 
 	log.Info(sctx.Ctx, "Successfully updated profile section: %s, new version: %d", req.Section, updatedProfile.Version)
