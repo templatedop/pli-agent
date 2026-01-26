@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -10,6 +11,7 @@ import (
 	dblib "gitlab.cept.gov.in/it-2.0-common/n-api-db"
 
 	"pli-agent-api/core/domain"
+	dbutil "pli-agent-api/db"
 )
 
 // AgentContactRepository handles all database operations for agent contacts
@@ -37,48 +39,44 @@ func (r *AgentContactRepository) Create(ctx context.Context, contact domain.Agen
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for contact creation with audit log in single transaction
-	// OPTIMIZATION: Batch operation combines INSERT contact + INSERT audit log
+	// Use CTE to combine INSERT + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// BR-AGT-PRF-010: Phone Number Categories (MOBILE, OFFICIAL_LANDLINE, RESIDENT_LANDLINE)
+	// BR-AGT-PRF-005: Audit Logging
 	batch := &pgx.Batch{}
 
-	// Query 1: Insert agent contact
-	// BR-AGT-PRF-010: Phone Number Categories (MOBILE, OFFICIAL_LANDLINE, RESIDENT_LANDLINE)
-	query1 := dblib.Psql.Insert(agentContactTable).
-		Columns(
-			"agent_id", "contact_type", "contact_number", "is_primary",
-			"effective_from", "metadata", "created_by",
-		).
-		Values(
-			contact.AgentID, contact.ContactType, contact.ContactNumber, contact.IsPrimary,
-			contact.EffectiveFrom, contact.Metadata, contact.CreatedBy,
-		).
-		Suffix("RETURNING contact_id, created_at, version")
+	sql := `
+		WITH inserted AS (
+			INSERT INTO agent_contacts (
+				agent_id, contact_type, contact_number, is_primary,
+				effective_from, metadata, created_by
+			) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			RETURNING *
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $8, $9, $10, $11, $12, $13
+		FROM inserted
+		RETURNING (SELECT ROW(contact_id, agent_id, contact_type, contact_number, is_primary,
+			effective_from, metadata, created_at, updated_at, created_by, updated_by, deleted_at, version) FROM inserted)
+	`
+
+	args := []interface{}{
+		contact.AgentID, contact.ContactType, contact.ContactNumber, contact.IsPrimary,
+		contact.EffectiveFrom, contact.Metadata, contact.CreatedBy,
+		domain.AuditActionContactUpdate, "contact_type", contact.ContactType, "New contact added", contact.CreatedBy, time.Now(),
+	}
 
 	var result domain.AgentContact
-	err := dblib.QueueReturnRow(batch, query1, pgx.RowToStructByNameLax[domain.AgentContact], &result)
+	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentContact], &result)
 	if err != nil {
 		return nil, err
 	}
 
-	// Query 2: Insert audit log for contact creation
-	// BR-AGT-PRF-005: Audit Logging
-	query2 := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(contact.AgentID, domain.AuditActionContactUpdate, "contact_type", contact.ContactType, "New contact added", contact.CreatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, query2)
-	if err != nil {
-		return nil, err
-	}
-
-	// Execute batch
 	err = r.db.SendBatch(cCtx, batch).Close()
 	if err != nil {
 		return nil, err
 	}
 
-	// Copy input data to result
-	result = contact
 	return &result, nil
 }
 
@@ -169,48 +167,47 @@ func (r *AgentContactRepository) Update(ctx context.Context, contactID string, u
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for update + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit logs in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// BR-AGT-PRF-005: Audit Logging
 	batch := &pgx.Batch{}
 
-	// Query 1: Update contact
-	updateQuery := dblib.Psql.Update(agentContactTable).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"contact_id": contactID, "deleted_at": nil})
+	// Build SET clause dynamically
+	setClauses := "updated_at = $2, updated_by = $3"
+	args := []interface{}{contactID, time.Now(), updatedBy}
+	argIndex := 4
 
-	// Apply updates
 	for field, value := range updates {
-		updateQuery = updateQuery.Set(field, value)
+		setClauses += fmt.Sprintf(", %s = $%d", field, argIndex)
+		args = append(args, value)
+		argIndex++
 	}
 
-	err := dblib.QueueExecRow(batch, updateQuery)
+	// Build audit log values for UNNEST
+	fieldNames := []string{}
+	newValues := []interface{}{}
+	for field, value := range updates {
+		fieldNames = append(fieldNames, field)
+		newValues = append(newValues, value)
+	}
+
+	sql := fmt.Sprintf(`
+		WITH updated AS (
+			UPDATE agent_contacts
+			SET %s
+			WHERE contact_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, performed_by, performed_at)
+		SELECT agent_id, $%d, unnest($%d::text[]), unnest($%d::text[]), $%d, $%d
+		FROM updated
+	`, setClauses, argIndex, argIndex+1, argIndex+2, argIndex+3, argIndex+4)
+
+	args = append(args, domain.AuditActionContactUpdate, fieldNames, newValues, updatedBy, time.Now())
+
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
-	}
-
-	// Query 2: Get agent_id for audit log
-	var agentID string
-	selectQuery := dblib.Psql.Select("agent_id").
-		From(agentContactTable).
-		Where(sq.Eq{"contact_id": contactID})
-
-	err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit logs for each field update
-	// BR-AGT-PRF-005: Audit Logging
-	for field, newValue := range updates {
-		auditQuery := dblib.Psql.Insert("agent_audit_logs").
-			Columns("agent_id", "action_type", "field_name", "new_value", "performed_by", "performed_at").
-			Values(agentID, domain.AuditActionContactUpdate, field, newValue, updatedBy, time.Now())
-
-		err = dblib.QueueExecRow(batch, auditQuery)
-		if err != nil {
-			return err
-		}
 	}
 
 	// Execute batch
@@ -222,38 +219,28 @@ func (r *AgentContactRepository) Delete(ctx context.Context, contactID, deletedB
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for delete + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	batch := &pgx.Batch{}
 
-	// Query 1: Soft delete contact
-	updateQuery := dblib.Psql.Update(agentContactTable).
-		Set("deleted_at", time.Now()).
-		Set("updated_by", deletedBy).
-		Where(sq.Eq{"contact_id": contactID, "deleted_at": nil})
+	sql := `
+		WITH updated AS (
+			UPDATE agent_contacts
+			SET deleted_at = $2, updated_by = $3
+			WHERE contact_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, action_reason, performed_by, performed_at)
+		SELECT agent_id, $4, $5, $6, $7, $8
+		FROM updated
+	`
 
-	err := dblib.QueueExecRow(batch, updateQuery)
-	if err != nil {
-		return err
+	args := []interface{}{
+		contactID, time.Now(), deletedBy,
+		domain.AuditActionDelete, "contact", "Contact deleted", deletedBy, time.Now(),
 	}
 
-	// Query 2: Get agent_id for audit log
-	var agentID string
-	selectQuery := dblib.Psql.Select("agent_id").
-		From(agentContactTable).
-		Where(sq.Eq{"contact_id": contactID})
-
-	err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit log
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "action_reason", "performed_by", "performed_at").
-		Values(agentID, domain.AuditActionDelete, "contact", "Contact deleted", deletedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, auditQuery)
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
 	}
@@ -263,104 +250,122 @@ func (r *AgentContactRepository) Delete(ctx context.Context, contactID, deletedB
 }
 
 // BatchCreate inserts multiple agent contacts in a single transaction
-// OPTIMIZATION: Batch operation for multiple contact inserts
+// OPTIMIZATION: Batch operation for multiple contact inserts using UNNEST
 // FR-AGT-PRF-010: Contact Management
 func (r *AgentContactRepository) BatchCreate(ctx context.Context, contacts []domain.AgentContact) ([]domain.AgentContact, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
 	defer cancel()
 
-	// Use batch for multiple contact inserts with audit logs
-	// OPTIMIZATION: Batch operation combines multiple INSERTs in single round-trip
+	// Use UNNEST to bulk insert contacts with audit logs in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must use UNNEST pattern
+	// BR-AGT-PRF-005: Audit Logging
 	batch := &pgx.Batch{}
-	results := make([]domain.AgentContact, len(contacts))
+
+	// Prepare arrays for UNNEST
+	agentIDs := make([]string, len(contacts))
+	contactTypes := make([]string, len(contacts))
+	contactNumbers := make([]string, len(contacts))
+	isPrimaries := make([]bool, len(contacts))
+	effectiveFroms := make([]time.Time, len(contacts))
+	metadatas := make([]interface{}, len(contacts))
+	createdBys := make([]string, len(contacts))
 
 	for i, contact := range contacts {
-		// Insert contact
-		insertQuery := dblib.Psql.Insert(agentContactTable).
-			Columns(
-				"agent_id", "contact_type", "contact_number", "is_primary",
-				"effective_from", "metadata", "created_by",
-			).
-			Values(
-				contact.AgentID, contact.ContactType, contact.ContactNumber, contact.IsPrimary,
-				contact.EffectiveFrom, contact.Metadata, contact.CreatedBy,
-			).
-			Suffix("RETURNING contact_id, created_at, version")
-
-		err := dblib.QueueReturnRow(batch, insertQuery, pgx.RowToStructByNameLax[domain.AgentContact], &results[i])
-		if err != nil {
-			return nil, err
-		}
-
-		// Insert audit log
-		auditQuery := dblib.Psql.Insert("agent_audit_logs").
-			Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-			Values(contact.AgentID, domain.AuditActionContactUpdate, "contact_type", contact.ContactType, "New contact added", contact.CreatedBy, time.Now())
-
-		err = dblib.QueueExecRow(batch, auditQuery)
-		if err != nil {
-			return nil, err
-		}
+		agentIDs[i] = contact.AgentID
+		contactTypes[i] = contact.ContactType
+		contactNumbers[i] = contact.ContactNumber
+		isPrimaries[i] = contact.IsPrimary
+		effectiveFroms[i] = contact.EffectiveFrom
+		metadatas[i] = contact.Metadata
+		createdBys[i] = contact.CreatedBy
 	}
 
-	// Execute batch
-	err := r.db.SendBatch(cCtx, batch).Close()
+	sql := `
+		WITH inserted AS (
+			INSERT INTO agent_contacts (agent_id, contact_type, contact_number, is_primary, effective_from, metadata, created_by)
+			SELECT * FROM UNNEST(
+				$1::uuid[],
+				$2::text[],
+				$3::text[],
+				$4::boolean[],
+				$5::timestamp[],
+				$6::jsonb[],
+				$7::text[]
+			)
+			RETURNING *
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $8, $9, contact_type, $10, created_by, NOW()
+		FROM inserted
+		RETURNING (SELECT array_agg(ROW(contact_id, agent_id, contact_type, contact_number, is_primary,
+			effective_from, metadata, created_at, created_by, updated_at, updated_by, deleted_at, version)::agent_contacts) FROM inserted)
+	`
+
+	args := []interface{}{
+		agentIDs, contactTypes, contactNumbers, isPrimaries, effectiveFroms, metadatas, createdBys,
+		domain.AuditActionContactUpdate, "contact_type", "New contact added",
+	}
+
+	var results []domain.AgentContact
+	err := dbutil.QueueReturnRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentContact], &results)
 	if err != nil {
 		return nil, err
 	}
 
-	// Copy input data to results
+	// Execute batch
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, err
+	}
+
+	// Copy input data to results if needed
 	for i := range contacts {
-		results[i] = contacts[i]
+		if i < len(results) {
+			results[i].ContactType = contacts[i].ContactType
+			results[i].ContactNumber = contacts[i].ContactNumber
+			results[i].IsPrimary = contacts[i].IsPrimary
+		}
 	}
 
 	return results, nil
 }
 
 // SetPrimaryContact sets a contact as primary and unsets others
-// OPTIMIZATION: Batch operation to update multiple contacts atomically
+// OPTIMIZATION: CTE pattern to update multiple contacts and insert audit in single query
 func (r *AgentContactRepository) SetPrimaryContact(ctx context.Context, contactID, agentID, updatedBy string) error {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch to unset all primary flags and set new primary
-	// OPTIMIZATION: Batch combines multiple UPDATEs + INSERT audit
+	// Use CTE to combine multiple UPDATEs + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	batch := &pgx.Batch{}
 
-	// Query 1: Unset all primary flags for agent
-	unsetQuery := dblib.Psql.Update(agentContactTable).
-		Set("is_primary", false).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"agent_id": agentID, "deleted_at": nil})
+	sql := `
+		WITH unset_primary AS (
+			UPDATE agent_contacts
+			SET is_primary = false, updated_at = $3, updated_by = $4
+			WHERE agent_id = $1 AND deleted_at IS NULL
+		),
+		set_primary AS (
+			UPDATE agent_contacts
+			SET is_primary = true, updated_at = $3, updated_by = $4
+			WHERE contact_id = $2 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $5, $6, $7, $8, $9, $10
+		FROM set_primary
+	`
 
-	err := dblib.QueueExecRow(batch, unsetQuery)
+	args := []interface{}{
+		agentID, contactID, time.Now(), updatedBy,
+		domain.AuditActionContactUpdate, "is_primary", "true", "Primary contact changed", updatedBy, time.Now(),
+	}
+
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
 	}
 
-	// Query 2: Set new primary contact
-	setPrimaryQuery := dblib.Psql.Update(agentContactTable).
-		Set("is_primary", true).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"contact_id": contactID, "deleted_at": nil})
-
-	err = dblib.QueueExecRow(batch, setPrimaryQuery)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit log
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(agentID, domain.AuditActionContactUpdate, "is_primary", "true", "Primary contact changed", updatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, auditQuery)
-	if err != nil {
-		return err
-	}
-
-	// Execute batch
 	return r.db.SendBatch(cCtx, batch).Close()
 }

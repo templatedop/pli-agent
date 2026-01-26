@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -10,6 +11,7 @@ import (
 	dblib "gitlab.cept.gov.in/it-2.0-common/n-api-db"
 
 	"pli-agent-api/core/domain"
+	dbutil "pli-agent-api/db"
 )
 
 // AgentLicenseRepository handles all database operations for agent licenses
@@ -46,54 +48,52 @@ func (r *AgentLicenseRepository) Create(ctx context.Context, license domain.Agen
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for license creation with audit log in single transaction
-	// OPTIMIZATION: Batch operation combines INSERT license + INSERT audit log
-	batch := &pgx.Batch{}
-
-	// Query 1: Insert agent license
+	// Use CTE to combine INSERT + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	// BR-AGT-PRF-012: Provisional license valid for 1 year, renewable max 2 times
 	// BR-AGT-PRF-030: Track license_date, renewal_date, authority_date
-	query1 := dblib.Psql.Insert(agentLicenseTable).
-		Columns(
-			"agent_id", "license_line", "license_type", "license_number", "resident_status",
-			"license_date", "renewal_date", "authority_date", "renewal_count", "license_status",
-			"licentiate_exam_passed", "licentiate_exam_date", "licentiate_certificate_number",
-			"is_primary", "metadata", "created_by",
-		).
-		Values(
-			license.AgentID, license.LicenseLine, license.LicenseType, license.LicenseNumber,
-			license.ResidentStatus, license.LicenseDate, license.RenewalDate, license.AuthorityDate,
-			license.RenewalCount, license.LicenseStatus, license.LicentiateExamPassed,
-			license.LicentiateExamDate, license.LicentiateCertificateNumber, license.IsPrimary,
-			license.Metadata, license.CreatedBy,
-		).
-		Suffix("RETURNING license_id, created_at, version")
+	// BR-AGT-PRF-005: Audit Logging
+	batch := &pgx.Batch{}
+
+	sql := `
+		WITH inserted AS (
+			INSERT INTO agent_licenses (
+				agent_id, license_line, license_type, license_number, resident_status,
+				license_date, renewal_date, authority_date, renewal_count, license_status,
+				licentiate_exam_passed, licentiate_exam_date, licentiate_certificate_number,
+				is_primary, metadata, created_by
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			RETURNING *
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $17, $18, $19, $20, $21, $22
+		FROM inserted
+		RETURNING (SELECT ROW(license_id, agent_id, license_line, license_type, license_number, resident_status,
+			license_date, renewal_date, authority_date, renewal_count, license_status, licentiate_exam_passed,
+			licentiate_exam_date, licentiate_certificate_number, is_primary, metadata,
+			created_at, updated_at, created_by, updated_by, deleted_at, version) FROM inserted)
+	`
+
+	args := []interface{}{
+		license.AgentID, license.LicenseLine, license.LicenseType, license.LicenseNumber,
+		license.ResidentStatus, license.LicenseDate, license.RenewalDate, license.AuthorityDate,
+		license.RenewalCount, license.LicenseStatus, license.LicentiateExamPassed,
+		license.LicentiateExamDate, license.LicentiateCertificateNumber, license.IsPrimary,
+		license.Metadata, license.CreatedBy,
+		domain.AuditActionLicenseAdd, "license_number", license.LicenseNumber, "New license added", license.CreatedBy, time.Now(),
+	}
 
 	var result domain.AgentLicense
-	err := dblib.QueueReturnRow(batch, query1, pgx.RowToStructByNameLax[domain.AgentLicense], &result)
+	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentLicense], &result)
 	if err != nil {
 		return nil, err
 	}
 
-	// Query 2: Insert audit log for license creation
-	// BR-AGT-PRF-005: Audit Logging
-	query2 := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(license.AgentID, domain.AuditActionLicenseAdd, "license_number", license.LicenseNumber, "New license added", license.CreatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, query2)
-	if err != nil {
-		return nil, err
-	}
-
-	// Execute batch
 	err = r.db.SendBatch(cCtx, batch).Close()
 	if err != nil {
 		return nil, err
 	}
 
-	// Copy input data to result
-	result = license
 	return &result, nil
 }
 
@@ -183,48 +183,47 @@ func (r *AgentLicenseRepository) Update(ctx context.Context, licenseID string, u
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for update + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit logs in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// BR-AGT-PRF-005: Audit Logging
 	batch := &pgx.Batch{}
 
-	// Query 1: Update license
-	updateQuery := dblib.Psql.Update(agentLicenseTable).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"license_id": licenseID, "deleted_at": nil})
+	// Build SET clause dynamically
+	setClauses := "updated_at = $2, updated_by = $3"
+	args := []interface{}{licenseID, time.Now(), updatedBy}
+	argIndex := 4
 
-	// Apply updates
 	for field, value := range updates {
-		updateQuery = updateQuery.Set(field, value)
+		setClauses += fmt.Sprintf(", %s = $%d", field, argIndex)
+		args = append(args, value)
+		argIndex++
 	}
 
-	err := dblib.QueueExecRow(batch, updateQuery)
+	// Build audit log values for UNNEST
+	fieldNames := []string{}
+	newValues := []interface{}{}
+	for field, value := range updates {
+		fieldNames = append(fieldNames, field)
+		newValues = append(newValues, value)
+	}
+
+	sql := fmt.Sprintf(`
+		WITH updated AS (
+			UPDATE agent_licenses
+			SET %s
+			WHERE license_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, performed_by, performed_at)
+		SELECT agent_id, $%d, unnest($%d::text[]), unnest($%d::text[]), $%d, $%d
+		FROM updated
+	`, setClauses, argIndex, argIndex+1, argIndex+2, argIndex+3, argIndex+4)
+
+	args = append(args, domain.AuditActionLicenseUpdate, fieldNames, newValues, updatedBy, time.Now())
+
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
-	}
-
-	// Query 2: Get agent_id for audit log
-	var agentID string
-	selectQuery := dblib.Psql.Select("agent_id").
-		From(agentLicenseTable).
-		Where(sq.Eq{"license_id": licenseID})
-
-	err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit logs for each field update
-	// BR-AGT-PRF-005: Audit Logging
-	for field, newValue := range updates {
-		auditQuery := dblib.Psql.Insert("agent_audit_logs").
-			Columns("agent_id", "action_type", "field_name", "new_value", "performed_by", "performed_at").
-			Values(agentID, domain.AuditActionLicenseUpdate, field, newValue, updatedBy, time.Now())
-
-		err = dblib.QueueExecRow(batch, auditQuery)
-		if err != nil {
-			return err
-		}
 	}
 
 	// Execute batch
@@ -239,41 +238,29 @@ func (r *AgentLicenseRepository) RenewLicense(ctx context.Context, licenseID, up
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for renewal update + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	batch := &pgx.Batch{}
 
-	// Query 1: Increment renewal count and update renewal date
-	updateQuery := dblib.Psql.Update(agentLicenseTable).
-		Set("renewal_count", sq.Expr("renewal_count + 1")).
-		Set("renewal_date", newRenewalDate).
-		Set("license_status", domain.LicenseStatusRenewed).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"license_id": licenseID, "deleted_at": nil})
+	sql := `
+		WITH updated AS (
+			UPDATE agent_licenses
+			SET renewal_count = renewal_count + 1, renewal_date = $2, license_status = $3,
+				updated_at = $4, updated_by = $5
+			WHERE license_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $6, $7, $8, $9, $10, $11
+		FROM updated
+	`
 
-	err := dblib.QueueExecRow(batch, updateQuery)
-	if err != nil {
-		return err
+	args := []interface{}{
+		licenseID, newRenewalDate, domain.LicenseStatusRenewed, time.Now(), updatedBy,
+		domain.AuditActionLicenseUpdate, "renewal_date", newRenewalDate, "License renewed", updatedBy, time.Now(),
 	}
 
-	// Query 2: Get agent_id for audit log
-	var agentID string
-	selectQuery := dblib.Psql.Select("agent_id").
-		From(agentLicenseTable).
-		Where(sq.Eq{"license_id": licenseID})
-
-	err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit log
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(agentID, domain.AuditActionLicenseUpdate, "renewal_date", newRenewalDate, "License renewed", updatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, auditQuery)
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
 	}
@@ -289,47 +276,35 @@ func (r *AgentLicenseRepository) ConvertToPermanent(ctx context.Context, license
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for conversion update + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// Calculate new renewal date: 5 years from conversion, then renewable every 1 year
 	batch := &pgx.Batch{}
 
-	// Calculate new renewal date: 5 years from conversion, then renewable every 1 year
 	permanentValidityDate := examDate.AddDate(5, 0, 0)
 
-	// Query 1: Convert to permanent license
-	updateQuery := dblib.Psql.Update(agentLicenseTable).
-		Set("license_type", domain.LicenseTypePermanent).
-		Set("licentiate_exam_passed", true).
-		Set("licentiate_exam_date", examDate).
-		Set("licentiate_certificate_number", certificateNumber).
-		Set("renewal_date", permanentValidityDate).
-		Set("license_status", domain.LicenseStatusActive).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"license_id": licenseID, "deleted_at": nil})
+	sql := `
+		WITH updated AS (
+			UPDATE agent_licenses
+			SET license_type = $2, licentiate_exam_passed = $3, licentiate_exam_date = $4,
+				licentiate_certificate_number = $5, renewal_date = $6, license_status = $7,
+				updated_at = $8, updated_by = $9
+			WHERE license_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $10, $11, $12, $13, $14, $15
+		FROM updated
+	`
 
-	err := dblib.QueueExecRow(batch, updateQuery)
-	if err != nil {
-		return err
+	args := []interface{}{
+		licenseID, domain.LicenseTypePermanent, true, examDate, certificateNumber,
+		permanentValidityDate, domain.LicenseStatusActive, time.Now(), updatedBy,
+		domain.AuditActionLicenseUpdate, "license_type", domain.LicenseTypePermanent,
+		"Converted to permanent after passing licentiate exam", updatedBy, time.Now(),
 	}
 
-	// Query 2: Get agent_id for audit log
-	var agentID string
-	selectQuery := dblib.Psql.Select("agent_id").
-		From(agentLicenseTable).
-		Where(sq.Eq{"license_id": licenseID})
-
-	err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit log
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(agentID, domain.AuditActionLicenseUpdate, "license_type", domain.LicenseTypePermanent, "Converted to permanent after passing licentiate exam", updatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, auditQuery)
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
 	}
@@ -388,39 +363,28 @@ func (r *AgentLicenseRepository) MarkAsExpired(ctx context.Context, licenseID, u
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for status update + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	batch := &pgx.Batch{}
 
-	// Query 1: Mark license as expired
-	updateQuery := dblib.Psql.Update(agentLicenseTable).
-		Set("license_status", domain.LicenseStatusExpired).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"license_id": licenseID, "deleted_at": nil})
+	sql := `
+		WITH updated AS (
+			UPDATE agent_licenses
+			SET license_status = $2, updated_at = $3, updated_by = $4
+			WHERE license_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $5, $6, $7, $8, $9, $10
+		FROM updated
+	`
 
-	err := dblib.QueueExecRow(batch, updateQuery)
-	if err != nil {
-		return err
+	args := []interface{}{
+		licenseID, domain.LicenseStatusExpired, time.Now(), updatedBy,
+		domain.AuditActionLicenseUpdate, "license_status", domain.LicenseStatusExpired, "License expired", updatedBy, time.Now(),
 	}
 
-	// Query 2: Get agent_id for audit log
-	var agentID string
-	selectQuery := dblib.Psql.Select("agent_id").
-		From(agentLicenseTable).
-		Where(sq.Eq{"license_id": licenseID})
-
-	err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit log
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(agentID, domain.AuditActionLicenseUpdate, "license_status", domain.LicenseStatusExpired, "License expired", updatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, auditQuery)
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
 	}
@@ -430,49 +394,37 @@ func (r *AgentLicenseRepository) MarkAsExpired(ctx context.Context, licenseID, u
 }
 
 // BatchMarkAsExpired marks multiple licenses as expired
-// OPTIMIZATION: Batch operation for bulk expiry processing
+// OPTIMIZATION: UNNEST pattern for bulk expiry processing with CTE
 // BR-AGT-PRF-013: Auto-Deactivation on License Expiry
 func (r *AgentLicenseRepository) BatchMarkAsExpired(ctx context.Context, licenseIDs []string, updatedBy string) error {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
 	defer cancel()
 
-	// Use batch for multiple license expiry updates
-	// OPTIMIZATION: Batch operation combines multiple UPDATEs in single round-trip
+	// Use UNNEST + CTE to bulk update licenses and insert audit logs in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must use UNNEST pattern
 	batch := &pgx.Batch{}
 
-	for _, licenseID := range licenseIDs {
-		// Update license status
-		updateQuery := dblib.Psql.Update(agentLicenseTable).
-			Set("license_status", domain.LicenseStatusExpired).
-			Set("updated_at", time.Now()).
-			Set("updated_by", updatedBy).
-			Where(sq.Eq{"license_id": licenseID, "deleted_at": nil})
+	sql := `
+		WITH updated AS (
+			UPDATE agent_licenses
+			SET license_status = $2, updated_at = $3, updated_by = $4
+			WHERE license_id = ANY($1::uuid[]) AND deleted_at IS NULL
+			RETURNING agent_id, license_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $5, $6, $7, $8, $9, $10
+		FROM updated
+	`
 
-		err := dblib.QueueExecRow(batch, updateQuery)
-		if err != nil {
-			return err
-		}
+	args := []interface{}{
+		licenseIDs, domain.LicenseStatusExpired, time.Now(), updatedBy,
+		domain.AuditActionLicenseUpdate, "license_status", domain.LicenseStatusExpired,
+		"License expired - batch processing", updatedBy, time.Now(),
+	}
 
-		// Get agent_id for audit log
-		var agentID string
-		selectQuery := dblib.Psql.Select("agent_id").
-			From(agentLicenseTable).
-			Where(sq.Eq{"license_id": licenseID})
-
-		err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-		if err != nil {
-			return err
-		}
-
-		// Insert audit log
-		auditQuery := dblib.Psql.Insert("agent_audit_logs").
-			Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-			Values(agentID, domain.AuditActionLicenseUpdate, "license_status", domain.LicenseStatusExpired, "License expired - batch processing", updatedBy, time.Now())
-
-		err = dblib.QueueExecRow(batch, auditQuery)
-		if err != nil {
-			return err
-		}
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
+	if err != nil {
+		return err
 	}
 
 	// Execute batch
@@ -484,38 +436,28 @@ func (r *AgentLicenseRepository) Delete(ctx context.Context, licenseID, deletedB
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for delete + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	batch := &pgx.Batch{}
 
-	// Query 1: Soft delete license
-	updateQuery := dblib.Psql.Update(agentLicenseTable).
-		Set("deleted_at", time.Now()).
-		Set("updated_by", deletedBy).
-		Where(sq.Eq{"license_id": licenseID, "deleted_at": nil})
+	sql := `
+		WITH updated AS (
+			UPDATE agent_licenses
+			SET deleted_at = $2, updated_by = $3
+			WHERE license_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, action_reason, performed_by, performed_at)
+		SELECT agent_id, $4, $5, $6, $7, $8
+		FROM updated
+	`
 
-	err := dblib.QueueExecRow(batch, updateQuery)
-	if err != nil {
-		return err
+	args := []interface{}{
+		licenseID, time.Now(), deletedBy,
+		domain.AuditActionDelete, "license", "License deleted", deletedBy, time.Now(),
 	}
 
-	// Query 2: Get agent_id for audit log
-	var agentID string
-	selectQuery := dblib.Psql.Select("agent_id").
-		From(agentLicenseTable).
-		Where(sq.Eq{"license_id": licenseID})
-
-	err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit log
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "action_reason", "performed_by", "performed_at").
-		Values(agentID, domain.AuditActionDelete, "license", "License deleted", deletedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, auditQuery)
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
 	}

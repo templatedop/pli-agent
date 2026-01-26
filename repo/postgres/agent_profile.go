@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -10,6 +11,7 @@ import (
 	dblib "gitlab.cept.gov.in/it-2.0-common/n-api-db"
 
 	"pli-agent-api/core/domain"
+	dbutil "pli-agent-api/db"
 )
 
 // AgentProfileRepository handles all database operations for agent profiles
@@ -37,47 +39,50 @@ func (r *AgentProfileRepository) Create(ctx context.Context, profile domain.Agen
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for profile creation with audit log in single transaction
-	// OPTIMIZATION: Batch operation combines INSERT profile + INSERT audit log
-	batch := &pgx.Batch{}
-
-	// Query 1: Insert agent profile
+	// Use CTE to combine INSERT profile + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	// VR-AGT-PRF-001 to VR-AGT-PRF-007: Personal Information Validation
 	// VR-AGT-PRF-003: PAN Format Validation
 	// VR-AGT-PRF-004: Aadhar Format Validation
-	query1 := dblib.Psql.Insert(agentProfileTable).
-		Columns(
-			"agent_type", "employee_id", "office_code", "circle_id", "division_id",
-			"advisor_coordinator_id", "title", "first_name", "middle_name", "last_name",
-			"gender", "date_of_birth", "category", "marital_status", "aadhar_number",
-			"pan_number", "designation_rank", "service_number", "professional_title",
-			"status", "status_date", "distribution_channel", "product_class",
-			"external_identification_number", "workflow_state", "created_by",
-		).
-		Values(
-			profile.AgentType, profile.EmployeeID, profile.OfficeCode, profile.CircleID,
-			profile.DivisionID, profile.AdvisorCoordinatorID, profile.Title, profile.FirstName,
-			profile.MiddleName, profile.LastName, profile.Gender, profile.DateOfBirth,
-			profile.Category, profile.MaritalStatus, profile.AadharNumber, profile.PANNumber,
-			profile.DesignationRank, profile.ServiceNumber, profile.ProfessionalTitle,
-			profile.Status, profile.StatusDate, profile.DistributionChannel, profile.ProductClass,
-			profile.ExternalIdentificationNumber, profile.WorkflowState, profile.CreatedBy,
-		).
-		Suffix("RETURNING agent_id, agent_code, created_at, version")
+	// BR-AGT-PRF-005: Name Update with Audit Logging
+	batch := &pgx.Batch{}
 
-	var result domain.AgentProfile
-	err := dblib.QueueReturnRow(batch, query1, pgx.RowToStructByNameLax[domain.AgentProfile], &result)
-	if err != nil {
-		return nil, err
+	sql := `
+		WITH inserted AS (
+			INSERT INTO agent_profiles (
+				agent_type, employee_id, office_code, circle_id, division_id,
+				advisor_coordinator_id, title, first_name, middle_name, last_name,
+				gender, date_of_birth, category, marital_status, aadhar_number,
+				pan_number, designation_rank, service_number, professional_title,
+				status, status_date, distribution_channel, product_class,
+				external_identification_number, workflow_state, created_by
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+			RETURNING *
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, action_reason, performed_by, performed_at)
+		SELECT agent_id, $27, $28, $29, $30
+		FROM inserted
+		RETURNING (SELECT ROW(agent_id, agent_code, agent_type, employee_id, office_code, circle_id, division_id,
+			advisor_coordinator_id, title, first_name, middle_name, last_name, gender, date_of_birth,
+			category, marital_status, aadhar_number, pan_number, designation_rank, service_number,
+			professional_title, status, status_date, status_reason, distribution_channel, product_class,
+			external_identification_number, workflow_state, created_at, created_by, updated_at, updated_by,
+			deleted_at, version) FROM inserted)
+	`
+
+	args := []interface{}{
+		profile.AgentType, profile.EmployeeID, profile.OfficeCode, profile.CircleID,
+		profile.DivisionID, profile.AdvisorCoordinatorID, profile.Title, profile.FirstName,
+		profile.MiddleName, profile.LastName, profile.Gender, profile.DateOfBirth,
+		profile.Category, profile.MaritalStatus, profile.AadharNumber, profile.PANNumber,
+		profile.DesignationRank, profile.ServiceNumber, profile.ProfessionalTitle,
+		profile.Status, profile.StatusDate, profile.DistributionChannel, profile.ProductClass,
+		profile.ExternalIdentificationNumber, profile.WorkflowState, profile.CreatedBy,
+		domain.AuditActionCreate, "Agent profile created", profile.CreatedBy, time.Now(),
 	}
 
-	// Query 2: Insert audit log for profile creation
-	// BR-AGT-PRF-005: Name Update with Audit Logging
-	query2 := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "action_reason", "performed_by", "performed_at").
-		Values(result.AgentID, domain.AuditActionCreate, "Agent profile created", profile.CreatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, query2)
+	var result domain.AgentProfile
+	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentProfile], &result)
 	if err != nil {
 		return nil, err
 	}
@@ -246,37 +251,47 @@ func (r *AgentProfileRepository) UpdatePersonalInfo(ctx context.Context, agentID
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for update + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit logs in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// BR-AGT-PRF-005: Audit Logging
 	batch := &pgx.Batch{}
 
-	// Query 1: Update profile
-	updateQuery := dblib.Psql.Update(agentProfileTable).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"agent_id": agentID, "deleted_at": nil})
+	// Build SET clause dynamically
+	setClauses := "updated_at = $2, updated_by = $3"
+	args := []interface{}{agentID, time.Now(), updatedBy}
+	argIndex := 4
 
-	// Apply updates
 	for field, value := range updates {
-		updateQuery = updateQuery.Set(field, value)
+		setClauses += fmt.Sprintf(", %s = $%d", field, argIndex)
+		args = append(args, value)
+		argIndex++
 	}
 
-	err := dblib.QueueExecRow(batch, updateQuery)
+	// Build audit log values for UNNEST
+	fieldNames := []string{}
+	newValues := []interface{}{}
+	for field, value := range updates {
+		fieldNames = append(fieldNames, field)
+		newValues = append(newValues, value)
+	}
+
+	sql := fmt.Sprintf(`
+		WITH updated AS (
+			UPDATE agent_profiles
+			SET %s
+			WHERE agent_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, performed_by, performed_at)
+		SELECT agent_id, $%d, unnest($%d::text[]), unnest($%d::text[]), $%d, $%d
+		FROM updated
+	`, setClauses, argIndex, argIndex+1, argIndex+2, argIndex+3, argIndex+4)
+
+	args = append(args, domain.AuditActionUpdate, fieldNames, newValues, updatedBy, time.Now())
+
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
-	}
-
-	// Query 2: Insert audit logs for each field update
-	// BR-AGT-PRF-005: Audit Logging
-	for field, newValue := range updates {
-		auditQuery := dblib.Psql.Insert("agent_audit_logs").
-			Columns("agent_id", "action_type", "field_name", "new_value", "performed_by", "performed_at").
-			Values(agentID, domain.AuditActionUpdate, field, newValue, updatedBy, time.Now())
-
-		err = dblib.QueueExecRow(batch, auditQuery)
-		if err != nil {
-			return err
-		}
 	}
 
 	// Execute batch
@@ -290,31 +305,29 @@ func (r *AgentProfileRepository) UpdateStatus(ctx context.Context, agentID, stat
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for status update + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// BR-AGT-PRF-016: Status Update with Mandatory Reason
 	batch := &pgx.Batch{}
 
-	// Query 1: Update status
-	updateQuery := dblib.Psql.Update(agentProfileTable).
-		Set("status", status).
-		Set("status_date", time.Now()).
-		Set("status_reason", reason).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"agent_id": agentID, "deleted_at": nil})
+	sql := `
+		WITH updated AS (
+			UPDATE agent_profiles
+			SET status = $2, status_date = $3, status_reason = $4, updated_at = $5, updated_by = $6
+			WHERE agent_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $7, $8, $9, $10, $11, $12
+		FROM updated
+	`
 
-	err := dblib.QueueExecRow(batch, updateQuery)
-	if err != nil {
-		return err
+	args := []interface{}{
+		agentID, status, time.Now(), reason, time.Now(), updatedBy,
+		domain.AuditActionStatusChange, "status", status, reason, updatedBy, time.Now(),
 	}
 
-	// Query 2: Insert audit log
-	// BR-AGT-PRF-016: Status Update with Mandatory Reason
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(agentID, domain.AuditActionStatusChange, "status", status, reason, updatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, auditQuery)
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
 	}
@@ -330,31 +343,29 @@ func (r *AgentProfileRepository) Terminate(ctx context.Context, agentID, reason,
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for termination + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// BR-AGT-PRF-017: Agent Termination Workflow
 	batch := &pgx.Batch{}
 
-	// Query 1: Update status to TERMINATED
-	// BR-AGT-PRF-017: Agent Termination Workflow
-	updateQuery := dblib.Psql.Update(agentProfileTable).
-		Set("status", domain.AgentStatusTerminated).
-		Set("status_date", effectiveDate).
-		Set("status_reason", reason).
-		Set("updated_at", time.Now()).
-		Set("updated_by", terminatedBy).
-		Where(sq.Eq{"agent_id": agentID, "deleted_at": nil})
+	sql := `
+		WITH updated AS (
+			UPDATE agent_profiles
+			SET status = $2, status_date = $3, status_reason = $4, updated_at = $5, updated_by = $6
+			WHERE agent_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $7, $8, $9, $10, $11, $12
+		FROM updated
+	`
 
-	err := dblib.QueueExecRow(batch, updateQuery)
-	if err != nil {
-		return err
+	args := []interface{}{
+		agentID, domain.AgentStatusTerminated, effectiveDate, reason, time.Now(), terminatedBy,
+		domain.AuditActionTerminate, "status", domain.AgentStatusTerminated, reason, terminatedBy, time.Now(),
 	}
 
-	// Query 2: Insert audit log for termination
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(agentID, domain.AuditActionTerminate, "status", domain.AgentStatusTerminated, reason, terminatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, auditQuery)
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
 	}

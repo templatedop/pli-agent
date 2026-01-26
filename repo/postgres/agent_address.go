@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -10,6 +11,7 @@ import (
 	dblib "gitlab.cept.gov.in/it-2.0-common/n-api-db"
 
 	"pli-agent-api/core/domain"
+	dbutil "pli-agent-api/db"
 )
 
 // AgentAddressRepository handles all database operations for agent addresses
@@ -42,51 +44,48 @@ func (r *AgentAddressRepository) Create(ctx context.Context, address domain.Agen
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for address creation with audit log in single transaction
-	// OPTIMIZATION: Batch operation combines INSERT address + INSERT audit log
+	// Use CTE to combine INSERT + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// BR-AGT-PRF-008: Multiple Address Types Support (OFFICIAL, PERMANENT, COMMUNICATION)
+	// BR-AGT-PRF-005: Audit Logging
 	batch := &pgx.Batch{}
 
-	// Query 1: Insert agent address
-	// BR-AGT-PRF-008: Multiple Address Types Support (OFFICIAL, PERMANENT, COMMUNICATION)
-	query1 := dblib.Psql.Insert(agentAddressTable).
-		Columns(
-			"agent_id", "address_type", "address_line1", "address_line2", "village",
-			"taluka", "city", "district", "state", "country", "pincode",
-			"is_same_as_permanent", "effective_from", "metadata", "created_by",
-		).
-		Values(
-			address.AgentID, address.AddressType, address.AddressLine1, address.AddressLine2,
-			address.Village, address.Taluka, address.City, address.District, address.State,
-			address.Country, address.Pincode, address.IsSameAsPermanent, address.EffectiveFrom,
-			address.Metadata, address.CreatedBy,
-		).
-		Suffix("RETURNING address_id, created_at, version")
+	sql := `
+		WITH inserted AS (
+			INSERT INTO agent_addresses (
+				agent_id, address_type, address_line1, address_line2, village,
+				taluka, city, district, state, country, pincode,
+				is_same_as_permanent, effective_from, metadata, created_by
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			RETURNING *
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $16, $17, $18, $19, $20, $21
+		FROM inserted
+		RETURNING (SELECT ROW(address_id, agent_id, address_type, address_line1, address_line2, village,
+			taluka, city, district, state, country, pincode, is_same_as_permanent, effective_from,
+			metadata, created_at, updated_at, created_by, updated_by, deleted_at, version) FROM inserted)
+	`
+
+	args := []interface{}{
+		address.AgentID, address.AddressType, address.AddressLine1, address.AddressLine2,
+		address.Village, address.Taluka, address.City, address.District, address.State,
+		address.Country, address.Pincode, address.IsSameAsPermanent, address.EffectiveFrom,
+		address.Metadata, address.CreatedBy,
+		domain.AuditActionAddressUpdate, "address_type", address.AddressType, "New address added", address.CreatedBy, time.Now(),
+	}
 
 	var result domain.AgentAddress
-	err := dblib.QueueReturnRow(batch, query1, pgx.RowToStructByNameLax[domain.AgentAddress], &result)
+	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentAddress], &result)
 	if err != nil {
 		return nil, err
 	}
 
-	// Query 2: Insert audit log for address creation
-	// BR-AGT-PRF-005: Audit Logging
-	query2 := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(address.AgentID, domain.AuditActionAddressUpdate, "address_type", address.AddressType, "New address added", address.CreatedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, query2)
-	if err != nil {
-		return nil, err
-	}
-
-	// Execute batch
 	err = r.db.SendBatch(cCtx, batch).Close()
 	if err != nil {
 		return nil, err
 	}
 
-	// Copy input data to result
-	result = address
 	return &result, nil
 }
 
@@ -157,48 +156,47 @@ func (r *AgentAddressRepository) Update(ctx context.Context, addressID string, u
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for update + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit logs in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// BR-AGT-PRF-005: Audit Logging
 	batch := &pgx.Batch{}
 
-	// Query 1: Update address
-	updateQuery := dblib.Psql.Update(agentAddressTable).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Where(sq.Eq{"address_id": addressID, "deleted_at": nil})
+	// Build SET clause dynamically
+	setClauses := "updated_at = $2, updated_by = $3"
+	args := []interface{}{addressID, time.Now(), updatedBy}
+	argIndex := 4
 
-	// Apply updates
 	for field, value := range updates {
-		updateQuery = updateQuery.Set(field, value)
+		setClauses += fmt.Sprintf(", %s = $%d", field, argIndex)
+		args = append(args, value)
+		argIndex++
 	}
 
-	err := dblib.QueueExecRow(batch, updateQuery)
+	// Build audit log values for UNNEST
+	fieldNames := []string{}
+	newValues := []interface{}{}
+	for field, value := range updates {
+		fieldNames = append(fieldNames, field)
+		newValues = append(newValues, value)
+	}
+
+	sql := fmt.Sprintf(`
+		WITH updated AS (
+			UPDATE agent_addresses
+			SET %s
+			WHERE address_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, performed_by, performed_at)
+		SELECT agent_id, $%d, unnest($%d::text[]), unnest($%d::text[]), $%d, $%d
+		FROM updated
+	`, setClauses, argIndex, argIndex+1, argIndex+2, argIndex+3, argIndex+4)
+
+	args = append(args, domain.AuditActionAddressUpdate, fieldNames, newValues, updatedBy, time.Now())
+
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
-	}
-
-	// Query 2: Get agent_id for audit log
-	var agentID string
-	selectQuery := dblib.Psql.Select("agent_id").
-		From(agentAddressTable).
-		Where(sq.Eq{"address_id": addressID})
-
-	err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit logs for each field update
-	// BR-AGT-PRF-005: Audit Logging
-	for field, newValue := range updates {
-		auditQuery := dblib.Psql.Insert("agent_audit_logs").
-			Columns("agent_id", "action_type", "field_name", "new_value", "performed_by", "performed_at").
-			Values(agentID, domain.AuditActionAddressUpdate, field, newValue, updatedBy, time.Now())
-
-		err = dblib.QueueExecRow(batch, auditQuery)
-		if err != nil {
-			return err
-		}
 	}
 
 	// Execute batch
@@ -210,38 +208,28 @@ func (r *AgentAddressRepository) Delete(ctx context.Context, addressID, deletedB
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch for delete + audit log
-	// OPTIMIZATION: Batch combines UPDATE + INSERT audit
+	// Use CTE to combine UPDATE + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	batch := &pgx.Batch{}
 
-	// Query 1: Soft delete address
-	updateQuery := dblib.Psql.Update(agentAddressTable).
-		Set("deleted_at", time.Now()).
-		Set("updated_by", deletedBy).
-		Where(sq.Eq{"address_id": addressID, "deleted_at": nil})
+	sql := `
+		WITH updated AS (
+			UPDATE agent_addresses
+			SET deleted_at = $2, updated_by = $3
+			WHERE address_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, action_reason, performed_by, performed_at)
+		SELECT agent_id, $4, $5, $6, $7, $8
+		FROM updated
+	`
 
-	err := dblib.QueueExecRow(batch, updateQuery)
-	if err != nil {
-		return err
+	args := []interface{}{
+		addressID, time.Now(), deletedBy,
+		domain.AuditActionDelete, "address", "Address deleted", deletedBy, time.Now(),
 	}
 
-	// Query 2: Get agent_id for audit log
-	var agentID string
-	selectQuery := dblib.Psql.Select("agent_id").
-		From(agentAddressTable).
-		Where(sq.Eq{"address_id": addressID})
-
-	err = dblib.QueueReturnRow(batch, selectQuery, pgx.RowTo[string], &agentID)
-	if err != nil {
-		return err
-	}
-
-	// Query 3: Insert audit log
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "action_reason", "performed_by", "performed_at").
-		Values(agentID, domain.AuditActionDelete, "address", "Address deleted", deletedBy, time.Now())
-
-	err = dblib.QueueExecRow(batch, auditQuery)
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return err
 	}
@@ -251,61 +239,102 @@ func (r *AgentAddressRepository) Delete(ctx context.Context, addressID, deletedB
 }
 
 // BatchCreate inserts multiple agent addresses in a single transaction
-// OPTIMIZATION: Batch operation for multiple address inserts
+// OPTIMIZATION: Batch operation for multiple address inserts using UNNEST
 // FR-AGT-PRF-009: Address Management
 func (r *AgentAddressRepository) BatchCreate(ctx context.Context, addresses []domain.AgentAddress) ([]domain.AgentAddress, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
 	defer cancel()
 
-	// Use batch for multiple address inserts with audit logs
-	// OPTIMIZATION: Batch operation combines multiple INSERTs in single round-trip
+	// Use UNNEST to bulk insert addresses with audit logs in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must use UNNEST pattern
+	// BR-AGT-PRF-005: Audit Logging
 	batch := &pgx.Batch{}
-	results := make([]domain.AgentAddress, len(addresses))
+
+	// Prepare arrays for UNNEST
+	agentIDs := make([]string, len(addresses))
+	addressTypes := make([]string, len(addresses))
+	addressLine1s := make([]string, len(addresses))
+	addressLine2s := make([]interface{}, len(addresses))
+	villages := make([]interface{}, len(addresses))
+	talukas := make([]interface{}, len(addresses))
+	cities := make([]string, len(addresses))
+	districts := make([]interface{}, len(addresses))
+	states := make([]string, len(addresses))
+	countries := make([]string, len(addresses))
+	pincodes := make([]string, len(addresses))
+	isSameAsPermanents := make([]bool, len(addresses))
+	effectiveFroms := make([]time.Time, len(addresses))
+	metadatas := make([]interface{}, len(addresses))
+	createdBys := make([]string, len(addresses))
 
 	for i, address := range addresses {
-		// Insert address
-		insertQuery := dblib.Psql.Insert(agentAddressTable).
-			Columns(
-				"agent_id", "address_type", "address_line1", "address_line2", "village",
-				"taluka", "city", "district", "state", "country", "pincode",
-				"is_same_as_permanent", "effective_from", "metadata", "created_by",
-			).
-			Values(
-				address.AgentID, address.AddressType, address.AddressLine1, address.AddressLine2,
-				address.Village, address.Taluka, address.City, address.District, address.State,
-				address.Country, address.Pincode, address.IsSameAsPermanent, address.EffectiveFrom,
-				address.Metadata, address.CreatedBy,
-			).
-			Suffix("RETURNING address_id, created_at, version")
-
-		err := dblib.QueueReturnRow(batch, insertQuery, pgx.RowToStructByNameLax[domain.AgentAddress], &results[i])
-		if err != nil {
-			return nil, err
-		}
-
-		// Insert audit log
-		auditQuery := dblib.Psql.Insert("agent_audit_logs").
-			Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-			Values(address.AgentID, domain.AuditActionAddressUpdate, "address_type", address.AddressType, "New address added", address.CreatedBy, time.Now())
-
-		err = dblib.QueueExecRow(batch, auditQuery)
-		if err != nil {
-			return nil, err
-		}
+		agentIDs[i] = address.AgentID
+		addressTypes[i] = address.AddressType
+		addressLine1s[i] = address.AddressLine1
+		addressLine2s[i] = address.AddressLine2
+		villages[i] = address.Village
+		talukas[i] = address.Taluka
+		cities[i] = address.City
+		districts[i] = address.District
+		states[i] = address.State
+		countries[i] = address.Country
+		pincodes[i] = address.Pincode
+		isSameAsPermanents[i] = address.IsSameAsPermanent
+		effectiveFroms[i] = address.EffectiveFrom
+		metadatas[i] = address.Metadata
+		createdBys[i] = address.CreatedBy
 	}
 
-	// Execute batch
-	err := r.db.SendBatch(cCtx, batch).Close()
+	sql := `
+		WITH inserted AS (
+			INSERT INTO agent_addresses (
+				agent_id, address_type, address_line1, address_line2, village, taluka,
+				city, district, state, country, pincode, is_same_as_permanent,
+				effective_from, metadata, created_by
+			)
+			SELECT * FROM UNNEST(
+				$1::uuid[],
+				$2::text[],
+				$3::text[],
+				$4::text[],
+				$5::text[],
+				$6::text[],
+				$7::text[],
+				$8::text[],
+				$9::text[],
+				$10::text[],
+				$11::text[],
+				$12::boolean[],
+				$13::timestamp[],
+				$14::jsonb[],
+				$15::text[]
+			)
+			RETURNING *
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $16, $17, address_type, $18, created_by, NOW()
+		FROM inserted
+	`
+
+	args := []interface{}{
+		agentIDs, addressTypes, addressLine1s, addressLine2s, villages, talukas,
+		cities, districts, states, countries, pincodes, isSameAsPermanents,
+		effectiveFroms, metadatas, createdBys,
+		domain.AuditActionAddressUpdate, "address_type", "New address added",
+	}
+
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
 		return nil, err
 	}
 
-	// Copy input data to results
-	for i := range addresses {
-		results[i] = addresses[i]
+	// Execute batch
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, err
 	}
 
-	return results, nil
+	return addresses, nil
 }
 
 // CopyCommunicationFromPermanent copies permanent address to communication address
@@ -314,37 +343,55 @@ func (r *AgentAddressRepository) CopyCommunicationFromPermanent(ctx context.Cont
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Use batch to get permanent address and create communication address
-	// OPTIMIZATION: Batch combines SELECT + INSERT
+	// Use CTE to combine SELECT + INSERT + INSERT audit in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// BR-AGT-PRF-009: Communication Address Same as Permanent Option
 	batch := &pgx.Batch{}
 
-	// Query 1: Get permanent address
-	var permanentAddress domain.AgentAddress
-	selectQuery := dblib.Psql.Select("*").
-		From(agentAddressTable).
-		Where(sq.Eq{"agent_id": agentID, "address_type": domain.AddressTypePermanent, "deleted_at": nil}).
-		OrderBy("effective_from DESC").
-		Limit(1)
+	sql := `
+		WITH permanent_addr AS (
+			SELECT * FROM agent_addresses
+			WHERE agent_id = $1 AND address_type = $2 AND deleted_at IS NULL
+			ORDER BY effective_from DESC
+			LIMIT 1
+		),
+		inserted AS (
+			INSERT INTO agent_addresses (
+				agent_id, address_type, address_line1, address_line2, village, taluka,
+				city, district, state, country, pincode, is_same_as_permanent,
+				effective_from, metadata, created_by
+			)
+			SELECT agent_id, $3, address_line1, address_line2, village, taluka,
+				city, district, state, country, pincode, $4,
+				$5, metadata, $6
+			FROM permanent_addr
+			RETURNING *
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT agent_id, $7, $8, $9, $10, $11, $12
+		FROM inserted
+		RETURNING (SELECT ROW(address_id, agent_id, address_type, address_line1, address_line2, village, taluka,
+			city, district, state, country, pincode, is_same_as_permanent, effective_from, metadata,
+			created_at, created_by, updated_at, updated_by, deleted_at, version) FROM inserted)
+	`
 
-	err := dblib.QueueReturnRow(batch, selectQuery, pgx.RowToStructByNameLax[domain.AgentAddress], &permanentAddress)
+	args := []interface{}{
+		agentID, domain.AddressTypePermanent, domain.AddressTypeCommunication, true, time.Now(), createdBy,
+		domain.AuditActionAddressUpdate, "address_type", domain.AddressTypeCommunication,
+		"Communication address copied from permanent", createdBy, time.Now(),
+	}
+
+	var result domain.AgentAddress
+	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentAddress], &result)
 	if err != nil {
 		return nil, err
 	}
 
-	// Execute first batch to get permanent address
+	// Execute batch
 	err = r.db.SendBatch(cCtx, batch).Close()
 	if err != nil {
 		return nil, err
 	}
 
-	// Create communication address with same data
-	communicationAddress := permanentAddress
-	communicationAddress.AddressID = "" // Will be generated
-	communicationAddress.AddressType = domain.AddressTypeCommunication
-	communicationAddress.IsSameAsPermanent = true
-	communicationAddress.CreatedBy = createdBy
-	communicationAddress.EffectiveFrom = time.Now()
-
-	// Create new address
-	return r.Create(ctx, communicationAddress)
+	return &result, nil
 }

@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -10,6 +11,7 @@ import (
 	dblib "gitlab.cept.gov.in/it-2.0-common/n-api-db"
 
 	"pli-agent-api/core/domain"
+	dbutil "pli-agent-api/db"
 )
 
 // AgentAuditLogRepository handles all database operations for agent audit logs
@@ -239,49 +241,71 @@ func (r *AgentAuditLogRepository) FindRecentByAgentID(ctx context.Context, agent
 }
 
 // BatchCreate inserts multiple audit log entries in a single transaction
-// OPTIMIZATION: Batch operation for multiple audit log inserts
+// OPTIMIZATION: UNNEST pattern for multiple audit log inserts
 // BR-AGT-PRF-005: Audit Logging - Bulk audit logging
-func (r *AgentAuditLogRepository) BatchCreate(ctx context.Context, auditLogs []domain.AgentAuditLog) ([]domain.AgentAuditLog, error) {
+func (r *AgentAuditLogRepository) BatchCreate(ctx context.Context, auditLogs []domain.AgentAuditLog) error {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
 	defer cancel()
 
-	// Use batch for multiple audit log inserts
-	// OPTIMIZATION: Batch operation combines multiple INSERTs in single round-trip
+	// Use UNNEST to bulk insert audit logs in single query
+	// CRITICAL: Golang variables cannot be passed between batch queries - must use UNNEST pattern
 	batch := &pgx.Batch{}
-	results := make([]domain.AgentAuditLog, len(auditLogs))
 
-	for i, auditLog := range auditLogs {
-		// Insert audit log
-		insertQuery := dblib.Psql.Insert(agentAuditLogTable).
-			Columns(
-				"agent_id", "action_type", "field_name", "old_value", "new_value",
-				"action_reason", "performed_by", "performed_at", "ip_address", "metadata",
-			).
-			Values(
-				auditLog.AgentID, auditLog.ActionType, auditLog.FieldName, auditLog.OldValue,
-				auditLog.NewValue, auditLog.ActionReason, auditLog.PerformedBy,
-				auditLog.PerformedAt, auditLog.IPAddress, auditLog.Metadata,
-			).
-			Suffix("RETURNING audit_id, created_at")
+	// Extract arrays for UNNEST
+	agentIDs := make([]string, len(auditLogs))
+	actionTypes := make([]string, len(auditLogs))
+	fieldNames := make([]sql.NullString, len(auditLogs))
+	oldValues := make([]sql.NullString, len(auditLogs))
+	newValues := make([]sql.NullString, len(auditLogs))
+	actionReasons := make([]sql.NullString, len(auditLogs))
+	performedBys := make([]string, len(auditLogs))
+	performedAts := make([]time.Time, len(auditLogs))
+	ipAddresses := make([]sql.NullString, len(auditLogs))
+	metadatas := make([]interface{}, len(auditLogs))
 
-		err := dblib.QueueReturnRow(batch, insertQuery, pgx.RowToStructByNameLax[domain.AgentAuditLog], &results[i])
-		if err != nil {
-			return nil, err
-		}
+	for i, log := range auditLogs {
+		agentIDs[i] = log.AgentID
+		actionTypes[i] = log.ActionType
+		fieldNames[i] = log.FieldName
+		oldValues[i] = log.OldValue
+		newValues[i] = log.NewValue
+		actionReasons[i] = log.ActionReason
+		performedBys[i] = log.PerformedBy
+		performedAts[i] = log.PerformedAt
+		ipAddresses[i] = log.IPAddress
+		metadatas[i] = log.Metadata
 	}
 
-	// Execute batch
-	err := r.db.SendBatch(cCtx, batch).Close()
+	sql := `
+		INSERT INTO agent_audit_logs (
+			agent_id, action_type, field_name, old_value, new_value,
+			action_reason, performed_by, performed_at, ip_address, metadata
+		)
+		SELECT * FROM UNNEST(
+			$1::uuid[],
+			$2::text[],
+			$3::text[],
+			$4::text[],
+			$5::text[],
+			$6::text[],
+			$7::text[],
+			$8::timestamp[],
+			$9::text[],
+			$10::jsonb[]
+		)
+	`
+
+	args := []interface{}{
+		agentIDs, actionTypes, fieldNames, oldValues, newValues,
+		actionReasons, performedBys, performedAts, ipAddresses, metadatas,
+	}
+
+	err := dbutil.QueueExecRowRaw(batch, sql, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	// Copy input data to results
-	for i := range auditLogs {
-		results[i] = auditLogs[i]
-	}
-
-	return results, nil
+	return r.db.SendBatch(cCtx, batch).Close()
 }
 
 // GetAuditSummary retrieves audit summary statistics for an agent
