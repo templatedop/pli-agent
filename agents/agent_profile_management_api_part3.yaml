@@ -1,0 +1,1544 @@
+openapi: 3.0.3
+info:
+  title: Agent Profile Management API - Part 3
+  version: 1.0.0
+  description: |
+    **Agent Profile Management API - Part 3**
+
+    **Part 3 Contents:**
+    - Self-Service Profile Update APIs (AGT-047 to AGT-049)
+    - Bank Details Management APIs (AGT-050 to AGT-054)
+    - Agent Goal Setting APIs (AGT-055 to AGT-059, AGT-069)
+    - Status Reinstatement APIs (AGT-060 to AGT-063, AGT-070, AGT-071)
+    - Agent Export APIs (AGT-064 to AGT-067)
+    - Additional Lookup APIs (AGT-072, AGT-073)
+    - Product Authorization APIs (AGT-074, AGT-075)
+    - Timeline & Notification APIs (AGT-076, AGT-077)
+    - Dashboard API (AGT-068)
+    - Webhook API (AGT-078)
+
+    **Total APIs in this part:** 27 endpoints
+    **Cumulative Total:** All 78 APIs across 3 parts
+
+  contact:
+    name: API Support
+    email: api-support@postal-life-insurance.gov.in
+
+servers:
+  - url: https://api.postallifeinsurance.gov.in/v1
+    description: Production Server
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Profile Management
+  - name: Bank Details
+  - name: Goals & Performance
+  - name: Status Management
+  - name: Export
+  - name: Search & Lookup
+  - name: Product Authorization
+  - name: Audit & Timeline
+  - name: Notifications
+  - name: Dashboard
+  - name: Approval
+  - name: Document
+  - name: Webhooks
+
+paths:
+  # ===========================================================================
+  # SELF-SERVICE PROFILE UPDATE (UJ-006) - AGT-047 to AGT-049, AGT-068
+  # ===========================================================================
+
+  /agents/{agent_id}/portal/profile:
+    get:
+      summary: Get Self-Service Profile
+      description: |
+        Agent views their own profile.
+
+        **Requirements:** FR-AGT-PRF-018, FR-AGT-PRF-021
+      operationId: getSelfServiceProfile
+      tags: [Profile Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SelfServiceProfileResponse'
+
+    put:
+      summary: Update Self-Service Profile
+      description: |
+        Agent updates own profile with OTP verification.
+
+        **Requirements:** FR-AGT-PRF-021, BR-AGT-PRF-005 to BR-AGT-PRF-011
+
+        **Workflow:** WF-AGT-PRF-010
+
+        **Allowed Updates (with OTP):**
+        - Address
+        - Contact
+        - Bank Details
+
+        **Not Allowed:**
+        - Name (requires admin)
+        - PAN (requires admin)
+        - Status (admin only)
+      operationId: updateSelfServiceProfile
+      tags: [Profile Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSelfServiceProfileRequest'
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateSelfServiceProfileResponse'
+
+  /agents/{agent_id}/portal/profile/otp:
+    post:
+      summary: Request Profile Update OTP
+      description: |
+        Sends OTP for profile update verification.
+
+        **Requirements:** BR-AGT-PRF-019, BR-AGT-PRF-020
+      operationId: requestProfileUpdateOTP
+      tags: [Profile Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [update_type]
+              properties:
+                update_type:
+                  type: string
+                  enum: [ADDRESS, CONTACT, BANK_DETAILS]
+      responses:
+        '200':
+          description: OTP sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transaction_id:
+                    type: string
+                    format: uuid
+                  otp_sent_to:
+                    type: string
+                  expires_at:
+                    type: string
+                    format: date-time
+
+  /dashboard/agent/{agent_id}:
+    get:
+      summary: Get Agent Dashboard
+      description: |
+        Retrieves agent dashboard with metrics.
+
+        **Requirements:** FR-AGT-PRF-018, FR-AGT-PRF-021
+      operationId: getAgentDashboard
+      tags: [Dashboard]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Dashboard data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentDashboardResponse'
+
+  # ===========================================================================
+  # BANK DETAILS MANAGEMENT (UJ-007) - AGT-050 to AGT-054
+  # ===========================================================================
+
+  /agents/{agent_id}/portal/bank-details:
+    get:
+      summary: Get Bank Details (Portal)
+      description: |
+        Agent views bank details (masked).
+
+        **Requirements:** FR-AGT-PRF-019, BR-AGT-PRF-018
+      operationId: getPortalBankDetails
+      tags: [Bank Details]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Bank details (masked)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankDetailsResponse'
+
+    post:
+      summary: Add Bank Details (Portal)
+      description: |
+        Agent adds bank/POSB account with OTP.
+
+        **Requirements:** FR-AGT-PRF-019, BR-AGT-PRF-018, VR-AGT-PRF-016, VR-AGT-PRF-017
+
+        **Workflow:** WF-AGT-PRF-008
+
+        **Account Types:**
+        - Bank Account (account_number + IFSC)
+        - POSB Account (account_number only)
+
+        **Security:**
+        - Account number encrypted
+        - Only last 4 digits shown
+        - OTP verification required
+      operationId: addPortalBankDetails
+      tags: [Bank Details]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddBankDetailsRequest'
+      responses:
+        '201':
+          description: Bank details added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddBankDetailsResponse'
+
+  /agents/{agent_id}/bank-details:
+    get:
+      summary: Get Bank Details (Admin)
+      description: Admin views agent bank details.
+      operationId: getAgentBankDetails
+      tags: [Bank Details]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Bank details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankDetailsResponse'
+
+    post:
+      summary: Add Bank Details (Admin)
+      description: Admin adds bank details on behalf of agent.
+      operationId: addAgentBankDetails
+      tags: [Bank Details]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddBankDetailsRequest'
+      responses:
+        '201':
+          description: Bank details added
+
+    put:
+      summary: Update Bank Details
+      description: Updates existing bank details.
+
+        **Workflow:** WF-AGT-PRF-008
+      operationId: updateBankDetails
+      tags: [Bank Details]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBankDetailsRequest'
+      responses:
+        '200':
+          description: Bank details updated
+
+  # ===========================================================================
+  # AGENT GOAL SETTING (UJ-008) - AGT-055 to AGT-059, AGT-069
+  # ===========================================================================
+
+  /agents/{agent_id}/goals:
+    get:
+      summary: Get Agent Goals
+      description: |
+        Retrieves performance goals.
+
+        **Requirements:** FR-AGT-PRF-020, BR-AGT-PRF-024
+      operationId: getAgentGoals
+      tags: [Goals & Performance]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: goal_period
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, COMPLETED, CANCELLED]
+      responses:
+        '200':
+          description: Agent goals
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentGoalsResponse'
+
+    post:
+      summary: Set Agent Goals
+      description: |
+        Coordinator sets performance goals.
+
+        **Requirements:** FR-AGT-PRF-020, BR-AGT-PRF-024
+
+        **Workflow:** WF-AGT-PRF-009
+
+        **Goal Types:**
+        - Policies count
+        - Premium amount
+        - Product-wise breakdown
+      operationId: setAgentGoals
+      tags: [Goals & Performance]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetAgentGoalsRequest'
+      responses:
+        '201':
+          description: Goals set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetAgentGoalsResponse'
+
+  /agents/{agent_id}/goals/{goal_id}:
+    put:
+      summary: Update Goals
+      description: Updates existing goals.
+
+        **Requirement:** FR-AGT-PRF-020
+      operationId: updateAgentGoals
+      tags: [Goals & Performance]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: goal_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAgentGoalsRequest'
+      responses:
+        '200':
+          description: Goals updated
+
+    delete:
+      summary: Delete Goals
+      description: Deletes/cancels goals.
+
+        **Requirement:** FR-AGT-PRF-020
+      operationId: deleteAgentGoals
+      tags: [Goals & Performance]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: goal_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Goals deleted
+
+  /agents/{agent_id}/goals/progress:
+    get:
+      summary: Get Goal Progress
+      description: |
+        Retrieves progress against goals.
+
+        **Requirements:** FR-AGT-PRF-018, FR-AGT-PRF-020
+      operationId: getGoalProgress
+      tags: [Goals & Performance]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: goal_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Goal progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoalProgressResponse'
+
+  /goals/templates:
+    get:
+      summary: Get Goal Templates
+      description: |
+        Retrieves pre-configured goal templates.
+
+        **Requirement:** FR-AGT-PRF-020
+      operationId: getGoalTemplates
+      tags: [Goals & Performance, Search & Lookup]
+      responses:
+        '200':
+          description: Goal templates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        template_id:
+                          type: string
+                          format: uuid
+                        template_name:
+                          type: string
+                        goal_period:
+                          type: string
+                        targets:
+                          type: object
+
+  # ===========================================================================
+  # STATUS REINSTATEMENT (UJ-009) - AGT-060 to AGT-063, AGT-070, AGT-071
+  # ===========================================================================
+
+  /reinstatement/request:
+    post:
+      summary: Create Reinstatement Request
+      description: |
+        Creates reinstatement request for approval.
+
+        **Requirement:** FR-AGT-PRF-013
+      operationId: createReinstatementRequest
+      tags: [Status Management, Approval]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReinstatementRequest'
+      responses:
+        '201':
+          description: Request created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReinstatementRequestResponse'
+
+  /reinstatement/{request_id}/approve:
+    put:
+      summary: Approve Reinstatement
+      description: Supervisor approves reinstatement.
+      operationId: approveReinstatement
+      tags: [Approval]
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveReinstatementRequest'
+      responses:
+        '200':
+          description: Reinstatement approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApproveReinstatementResponse'
+
+  /reinstatement/{request_id}/reject:
+    put:
+      summary: Reject Reinstatement
+      description: Supervisor rejects reinstatement.
+      operationId: rejectReinstatement
+      tags: [Approval]
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, rejector_comments, rejected_by]
+              properties:
+                action:
+                  type: string
+                  enum: [REJECT]
+                rejector_comments:
+                  type: string
+                  minLength: 10
+                rejected_by:
+                  type: string
+      responses:
+        '200':
+          description: Request rejected
+
+  /reinstatement/{request_id}/documents:
+    post:
+      summary: Upload Reinstatement Documents
+      description: Uploads supporting documents.
+      operationId: uploadReinstatementDocuments
+      tags: [Status Management, Document]
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [documents]
+              properties:
+                documents:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                document_type:
+                  type: string
+                  enum: [IDENTITY_PROOF, ADDRESS_PROOF, LICENCE_COPY, NO_DUE_CERTIFICATE]
+      responses:
+        '201':
+          description: Documents uploaded
+
+  /reinstatement/reasons:
+    get:
+      summary: Get Reinstatement Reasons
+      description: Retrieves reinstatement reasons dropdown.
+      operationId: getReinstatementReasons
+      tags: [Search & Lookup]
+      responses:
+        '200':
+          description: Reinstatement reasons
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reinstatement_reasons:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code:
+                          type: string
+                        name:
+                          type: string
+
+  /status-types:
+    get:
+      summary: Get Status Types
+      description: Retrieves agent status types dropdown.
+      operationId: getStatusTypes
+      tags: [Search & Lookup]
+      responses:
+        '200':
+          description: Status types
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status_types:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code:
+                          type: string
+                          enum: [ACTIVE, SUSPENDED, TERMINATED, DEACTIVATED]
+                        name:
+                          type: string
+
+  /termination/reasons:
+    get:
+      summary: Get Termination Reasons
+      description: |
+        Retrieves termination reasons dropdown.
+
+        **Requirements:** BR-AGT-PRF-017, VR-AGT-PRF-020
+      operationId: getTerminationReasons
+      tags: [Search & Lookup]
+      responses:
+        '200':
+          description: Termination reasons
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  termination_reasons:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code:
+                          type: string
+                        name:
+                          type: string
+                        description:
+                          type: string
+
+  # ===========================================================================
+  # AGENT EXPORT (UJ-010) - AGT-064 to AGT-067
+  # ===========================================================================
+
+  /agents/export/configure:
+    post:
+      summary: Configure Export
+      description: |
+        Configures export parameters.
+
+        **Requirement:** FR-AGT-PRF-025
+      operationId: configureAgentExport
+      tags: [Export]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigureExportRequest'
+      responses:
+        '201':
+          description: Export configuration created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigureExportResponse'
+
+  /agents/export/execute:
+    post:
+      summary: Execute Export
+      description: |
+        Executes configured export.
+
+        **Requirements:** FR-AGT-PRF-025, E-AGT-PRF-008
+
+        **Workflow:** WF-AGT-PRF-012
+
+        **Formats:**
+        - PDF (Profile reports)
+        - Excel (Bulk data)
+      operationId: executeAgentExport
+      tags: [Export]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecuteExportRequest'
+      responses:
+        '202':
+          description: Export job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecuteExportResponse'
+
+  /agents/export/{export_id}/status:
+    get:
+      summary: Get Export Status
+      description: Checks export job status.
+      operationId: getExportStatus
+      tags: [Export]
+      parameters:
+        - name: export_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Export status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportStatusResponse'
+
+  /agents/export/{export_id}/download:
+    get:
+      summary: Download Export File
+      description: Downloads generated export file.
+      operationId: downloadExportFile
+      tags: [Export, Document]
+      parameters:
+        - name: export_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Export file
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+
+  # ===========================================================================
+  # ADDITIONAL LOOKUP APIS - AGT-072, AGT-073
+  # ===========================================================================
+
+  /agents/{agent_id}/hierarchy:
+    get:
+      summary: Get Agent Hierarchy
+      description: |
+        Retrieves hierarchy information.
+
+        **Requirements:** BR-AGT-PRF-001, BR-AGT-PRF-002
+      operationId: getAgentHierarchy
+      tags: [Search & Lookup]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent hierarchy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent_id:
+                    type: string
+                  agent_type:
+                    type: string
+                  hierarchy_chain:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        agent_id:
+                          type: string
+                        name:
+                          type: string
+                        agent_type:
+                          type: string
+                        level:
+                          type: integer
+
+  # ===========================================================================
+  # PRODUCT AUTHORIZATION - AGT-074, AGT-075
+  # ===========================================================================
+
+  /agents/{agent_id}/product-authorization:
+    get:
+      summary: Get Product Authorization
+      description: |
+        Retrieves product authorization.
+
+        **Requirements:** FR-AGT-PRF-024, BR-AGT-PRF-026
+      operationId: getProductAuthorization
+      tags: [Product Authorization]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Product authorization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductAuthorizationResponse'
+
+    post:
+      summary: Grant Product Authorization
+      description: |
+        Grants authorization for product class.
+
+        **Requirements:** FR-AGT-PRF-024, BR-AGT-PRF-026
+      operationId: grantProductAuthorization
+      tags: [Product Authorization]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_class, effective_date, granted_by]
+              properties:
+                product_class:
+                  type: string
+                  enum: [PLI, RPLI]
+                effective_date:
+                  type: string
+                  format: date
+                license_verification:
+                  type: boolean
+                  default: true
+                granted_by:
+                  type: string
+      responses:
+        '201':
+          description: Authorization granted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authorization_id:
+                    type: string
+                    format: uuid
+                  agent_id:
+                    type: string
+                  product_class:
+                    type: string
+                  effective_date:
+                    type: string
+                    format: date
+                  granted_at:
+                    type: string
+                    format: date-time
+
+  # ===========================================================================
+  # TIMELINE & NOTIFICATIONS - AGT-076, AGT-077
+  # ===========================================================================
+
+  /agents/{agent_id}/timeline:
+    get:
+      summary: Get Agent Timeline
+      description: |
+        Retrieves complete activity timeline.
+
+        **Requirement:** E-AGT-PRF-008
+      operationId: getAgentTimeline
+      tags: [Audit & Timeline]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: activity_type
+          in: query
+          schema:
+            type: string
+            enum: [PROFILE_CHANGE, STATUS_CHANGE, LICENSE_UPDATE, GOAL_UPDATE]
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Activity timeline
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent_id:
+                    type: string
+                  timeline:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        timestamp:
+                          type: string
+                          format: date-time
+                        activity_type:
+                          type: string
+                        description:
+                          type: string
+                        performed_by:
+                          type: string
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMetadata'
+
+  /agents/{agent_id}/notifications:
+    get:
+      summary: Get Agent Notifications
+      description: |
+        Retrieves notifications sent to agent.
+
+        **Integration:** INT-AGT-005
+      operationId: getAgentNotifications
+      tags: [Notifications]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: notification_type
+          in: query
+          schema:
+            type: string
+            enum: [EMAIL, SMS, INTERNAL]
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Agent notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notifications:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        notification_id:
+                          type: string
+                          format: uuid
+                        type:
+                          type: string
+                          enum: [EMAIL, SMS, INTERNAL]
+                        template:
+                          type: string
+                        sent_at:
+                          type: string
+                          format: date-time
+                        status:
+                          type: string
+                          enum: [SENT, DELIVERED, FAILED]
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMetadata'
+
+  # ===========================================================================
+  # WEBHOOK - AGT-078
+  # ===========================================================================
+
+  /webhooks/hrms/employee-update:
+    post:
+      summary: HRMS Employee Update Webhook
+      description: |
+        Webhook for HRMS system to notify employee changes.
+
+        **Integration:** INT-AGT-001
+
+        **Event Types:**
+        - EMPLOYEE_CREATED
+        - EMPLOYEE_UPDATED
+        - EMPLOYEE_TRANSFERRED
+        - EMPLOYEE_TERMINATED
+      operationId: hrmsEmployeeUpdateWebhook
+      tags: [Webhooks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HRMSEmployeeUpdateEvent'
+      responses:
+        '200':
+          description: Webhook processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [PROCESSED, ACKNOWLEDGED]
+                  event_id:
+                    type: string
+                    format: uuid
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # Bank Details Schemas
+    AddBankDetailsRequest:
+      type: object
+      required:
+        - account_type
+        - otp
+      properties:
+        account_type:
+          type: string
+          enum: [BANK_ACCOUNT, POSB_ACCOUNT]
+        account_number:
+          type: string
+          minLength: 9
+          maxLength: 18
+        ifsc_code:
+          type: string
+          pattern: '^[A-Z]{4}0[A-Z0-9]{6}$'
+        bank_name:
+          type: string
+        branch_name:
+          type: string
+        account_holder_name:
+          type: string
+        otp:
+          type: string
+          pattern: '^[0-9]{6}$'
+
+    AddBankDetailsResponse:
+      type: object
+      properties:
+        bank_details_id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+        account_type:
+          type: string
+        account_number_masked:
+          type: string
+        bank_name:
+          type: string
+        branch_name:
+          type: string
+        ifsc_code:
+          type: string
+        verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    BankDetailsResponse:
+      type: object
+      properties:
+        bank_details:
+          type: array
+          items:
+            type: object
+            properties:
+              bank_details_id:
+                type: string
+                format: uuid
+              account_type:
+                type: string
+              account_number_masked:
+                type: string
+              ifsc_code:
+                type: string
+              bank_name:
+                type: string
+              branch_name:
+                type: string
+              verified:
+                type: boolean
+
+    UpdateBankDetailsRequest:
+      type: object
+      properties:
+        account_number:
+          type: string
+        ifsc_code:
+          type: string
+        bank_name:
+          type: string
+        branch_name:
+          type: string
+
+    # Goal Schemas
+    SetAgentGoalsRequest:
+      type: object
+      required:
+        - goal_period
+        - targets
+        - set_by
+      properties:
+        goal_period:
+          type: object
+          required:
+            - from_date
+            - to_date
+          properties:
+            from_date:
+              type: string
+              format: date
+            to_date:
+              type: string
+              format: date
+            period_name:
+              type: string
+        targets:
+          type: object
+          required:
+            - policies_count
+            - premium_amount
+          properties:
+            policies_count:
+              type: integer
+              minimum: 1
+            premium_amount:
+              type: number
+              format: double
+            product_wise_breakdown:
+              type: object
+              properties:
+                PLI:
+                  type: number
+                RPLI:
+                  type: number
+        set_by:
+          type: string
+
+    AgentGoalsResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        goals:
+          type: array
+          items:
+            type: object
+            properties:
+              goal_id:
+                type: string
+                format: uuid
+              goal_period:
+                type: string
+              targets:
+                type: object
+              progress:
+                type: object
+              status:
+                type: string
+
+    GoalProgressResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        goals_progress:
+          type: array
+          items:
+            type: object
+            properties:
+              goal_id:
+                type: string
+              goal_period:
+                type: string
+              targets:
+                type: object
+              achieved:
+                type: object
+              percentage_complete:
+                type: number
+              status:
+                type: string
+
+    # Export Schemas
+    ConfigureExportRequest:
+      type: object
+      required:
+        - export_name
+        - filters
+        - fields
+      properties:
+        export_name:
+          type: string
+        filters:
+          type: object
+          properties:
+            status:
+              type: string
+            office_code:
+              type: string
+            from_date:
+              type: string
+              format: date
+            to_date:
+              type: string
+              format: date
+        fields:
+          type: array
+          items:
+            type: string
+        output_format:
+          type: string
+          enum: [PDF, EXCEL]
+          default: EXCEL
+
+    ExecuteExportRequest:
+      type: object
+      required:
+        - export_config_id
+      properties:
+        export_config_id:
+          type: string
+          format: uuid
+        requested_by:
+          type: string
+
+    ExportStatusResponse:
+      type: object
+      properties:
+        export_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, IN_PROGRESS, COMPLETED, FAILED]
+        progress_percentage:
+          type: integer
+        file_url:
+          type: string
+          format: uri
+        completed_at:
+          type: string
+          format: date-time
+
+    # Product Authorization Schema
+    ProductAuthorizationResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        product_authorizations:
+          type: array
+          items:
+            type: object
+            properties:
+              product_class:
+                type: string
+                enum: [PLI, RPLI]
+              effective_date:
+                type: string
+                format: date
+              license_eligible:
+                type: boolean
+              authorized:
+                type: boolean
+
+    # Dashboard Schema
+    AgentDashboardResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        profile_summary:
+          type: object
+          properties:
+            name:
+              type: string
+            agent_type:
+              type: string
+            status:
+              type: string
+            pan:
+              type: string
+        performance_metrics:
+          type: object
+          properties:
+            policies_sold:
+              type: integer
+            premium_collected:
+              type: number
+            targets_achieved:
+              type: object
+        pending_tasks:
+          type: array
+          items:
+            type: object
+            properties:
+              task:
+                type: string
+              priority:
+                type: string
+              due_date:
+                type: string
+              overdue:
+                type: boolean
+        notifications:
+          type: array
+          items:
+            type: object
+
+    # Reinstatement Schema
+    ReinstatementRequest:
+      type: object
+      required:
+        - agent_id
+        - reinstatement_reason
+        - effective_date
+        - requested_by
+      properties:
+        agent_id:
+          type: string
+        reinstatement_reason:
+          type: string
+          minLength: 10
+        reinstatement_reason_code:
+          type: string
+        effective_date:
+          type: string
+          format: date
+        supporting_documents:
+          type: array
+          items:
+            type: string
+        requested_by:
+          type: string
+
+    # Webhook Schema
+    HRMSEmployeeUpdateEvent:
+      type: object
+      required:
+        - event_id
+        - event_type
+        - timestamp
+        - employee_data
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          enum: [EMPLOYEE_CREATED, EMPLOYEE_UPDATED, EMPLOYEE_TRANSFERRED, EMPLOYEE_TERMINATED]
+        timestamp:
+          type: string
+          format: date-time
+        employee_data:
+          type: object
+          properties:
+            employee_id:
+              type: string
+            name:
+              type: string
+            designation:
+              type: string
+            office_code:
+              type: string
+            status:
+              type: string
+
+    # Self-Service Schema
+    SelfServiceProfileResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        personal_info:
+          type: object
+        addresses:
+          type: array
+          items:
+            type: object
+        contacts:
+          type: array
+          items:
+            type: object
+        bank_details:
+          type: array
+          items:
+            type: object
+        workflow_state:
+          type: object
+
+    UpdateSelfServiceProfileRequest:
+      type: object
+      properties:
+        update_type:
+          type: string
+          enum: [ADDRESS, CONTACT, BANK_DETAILS]
+        otp:
+          type: string
+          pattern: '^[0-9]{6}$'
+        transaction_id:
+          type: string
+          format: uuid
+        address_changes:
+          type: array
+          items:
+            type: object
+        contact_changes:
+          type: array
+          items:
+            type: object
+        bank_details_changes:
+          type: object
+
+    UpdateSelfServiceProfileResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        update_status:
+          type: string
+        changes_applied:
+          type: object
+        audit_log:
+          type: object
+
+    # Common Pagination
+    PaginationMetadata:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total_count:
+          type: integer
+        total_pages:
+          type: integer
+        has_next:
+          type: boolean
+        has_previous:
+          type: boolean

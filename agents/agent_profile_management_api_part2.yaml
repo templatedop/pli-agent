@@ -1,0 +1,1345 @@
+openapi: 3.0.3
+info:
+  title: Agent Profile Management API - Part 2
+  version: 1.0.0
+  description: |
+    **Agent Profile Management API - Part 2**
+
+    **Part 2 Contents:**
+    - Profile Update APIs (AGT-025 to AGT-028)
+    - License Management APIs (AGT-029 to AGT-038)
+    - Agent Termination APIs (AGT-039 to AGT-041)
+    - Portal Authentication APIs (AGT-042 to AGT-046)
+
+  contact:
+    name: API Support
+    email: api-support@postal-life-insurance.gov.in
+
+servers:
+  - url: https://api.postallifeinsurance.gov.in/v1
+    description: Production Server
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Profile Management
+  - name: License Management
+  - name: Authentication
+  - name: Status Management
+  - name: Approval
+  - name: Audit & Timeline
+
+paths:
+  # ===========================================================================
+  # PROFILE UPDATE (UJ-002) - AGT-025 to AGT-028
+  # ===========================================================================
+
+  /agents/{agent_id}/sections/{section}:
+    put:
+      summary: Update Profile Section
+      description: |
+        Updates profile section with approval workflow for critical fields.
+
+        **Requirements:** FR-AGT-PRF-006, FR-AGT-PRF-007, BR-AGT-PRF-005, BR-AGT-PRF-006
+
+        **Workflow:** WF-AGT-PRF-002
+
+        **Critical Fields Requiring Approval:**
+        - Name changes
+        - PAN changes
+      operationId: updateProfileSection
+      tags: [Profile Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: section
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [personal_info, address, contact, license, bank_details, status]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [changes, updated_by]
+              properties:
+                changes:
+                  type: object
+                  description: Field changes with old/new values
+                  example:
+                    first_name:
+                      old_value: Rajesh
+                      new_value: Rajesh K.
+                    pan_number:
+                      old_value: ABCDE1234F
+                      new_value: XYZPQ5678R
+                update_reason:
+                  type: string
+                  minLength: 10
+                  example: Name correction as per Aadhar
+                updated_by:
+                  type: string
+                require_approval_for_critical:
+                  type: boolean
+                  default: true
+      responses:
+        '200':
+          description: Update successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateProfileSectionResponse'
+        '400':
+          description: Validation failed
+        '409':
+          description: Conflict (e.g., PAN exists)
+
+  /approvals/{approval_request_id}/approve:
+    put:
+      summary: Approve Profile Update
+      description: |
+        Supervisor approves pending profile update.
+
+        **Requirements:** FR-AGT-PRF-006, BR-AGT-PRF-005, BR-AGT-PRF-006
+      operationId: approveProfileUpdate
+      tags: [Approval]
+      parameters:
+        - name: approval_request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, approver_comments, approved_by]
+              properties:
+                action:
+                  type: string
+                  enum: [APPROVE]
+                approver_comments:
+                  type: string
+                  minLength: 5
+                approved_by:
+                  type: string
+                attachments:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Update approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApproveRequestResponse'
+
+  /approvals/{approval_request_id}/reject:
+    put:
+      summary: Reject Profile Update
+      description: Supervisor rejects pending profile update.
+      operationId: rejectProfileUpdate
+      tags: [Approval]
+      parameters:
+        - name: approval_request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, rejector_comments, rejected_by]
+              properties:
+                action:
+                  type: string
+                  enum: [REJECT]
+                rejector_comments:
+                  type: string
+                  minLength: 10
+                rejected_by:
+                  type: string
+      responses:
+        '200':
+          description: Update rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approval_request_id:
+                    type: string
+                    format: uuid
+                  approval_status:
+                    type: string
+                  rejected_at:
+                    type: string
+                    format: date-time
+
+  /agents/{agent_id}/audit-history:
+    get:
+      summary: Get Audit History
+      description: |
+        Retrieves complete audit trail.
+
+        **Requirements:** FR-AGT-PRF-022, E-AGT-PRF-008
+      operationId: getAgentAuditHistory
+      tags: [Audit & Timeline]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Audit history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditHistoryResponse'
+
+  # ===========================================================================
+  # LICENSE MANAGEMENT (UJ-003) - AGT-029 to AGT-038
+  # ===========================================================================
+
+  /agents/{agent_id}/licenses:
+    get:
+      summary: Get Agent Licenses
+      description: |
+        Retrieves all licenses with expiry status.
+
+        **Requirements:** FR-AGT-PRF-010, BR-AGT-PRF-012, BR-AGT-PRF-014
+      operationId: getAgentLicenses
+      tags: [License Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [Active, Expired, Pending_Renewal]
+      responses:
+        '200':
+          description: Agent licenses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentLicensesResponse'
+
+    post:
+      summary: Add License
+      description: |
+        Adds new license with renewal date calculation.
+
+        **Requirements:** FR-AGT-PRF-010, BR-AGT-PRF-012, VR-AGT-PRF-031 to VR-AGT-PRF-036
+
+        **Renewal Rules:**
+        - Provisional: 1 year
+        - Permanent (after exam): 5 years
+        - Annual renewal required
+      operationId: addAgentLicense
+      tags: [License Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddLicenseRequest'
+      responses:
+        '201':
+          description: License added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddLicenseResponse'
+
+  /agents/{agent_id}/licenses/{license_id}:
+    get:
+      summary: Get License Details
+      description: Retrieves specific license details.
+      operationId: getLicenseDetails
+      tags: [License Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: license_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: License details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LicenseDetailsResponse'
+
+    put:
+      summary: Update License
+      description: Updates existing license.
+
+        **Requirements:** FR-AGT-PRF-010, BR-AGT-PRF-012
+      operationId: updateLicense
+      tags: [License Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: license_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLicenseRequest'
+      responses:
+        '200':
+          description: License updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateLicenseResponse'
+
+    delete:
+      summary: Delete License
+      description: Deletes license (rare operation).
+      operationId: deleteLicense
+      tags: [License Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: license_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: License deleted
+
+  /agents/{agent_id}/licenses/{license_id}/renew:
+    put:
+      summary: Renew License
+      description: |
+        Renews license with period calculation.
+
+        **Requirements:** FR-AGT-PRF-011, BR-AGT-PRF-012 (COMPLEX)
+
+        **Renewal Rules:**
+        1. Provisional: 1 year
+        2. Pass exam within 3 years → Permanent: 5 years
+        3. Max 2 provisional renewals
+        4. Annual renewal for permanent
+        5. Not passed in 3 years → Terminated
+
+        **Workflow:** WF-AGT-PRF-003
+      operationId: renewLicense
+      tags: [License Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: license_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenewLicenseRequest'
+      responses:
+        '200':
+          description: License renewed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenewLicenseResponse'
+
+  /license-types:
+    get:
+      summary: Get License Types
+      description: Retrieves license types dropdown.
+      operationId: getLicenseTypes
+      tags: [License Management]
+      responses:
+        '200':
+          description: License types
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  license_types:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        code:
+                          type: string
+                        name:
+                          type: string
+                        description:
+                          type: string
+
+  /licenses/expiring:
+    get:
+      summary: Get Expiring Licenses
+      description: |
+        Retrieves licenses expiring within specified days.
+
+        **Business Rule:** BR-AGT-PRF-014
+      operationId: getExpiringLicenses
+      tags: [License Management]
+      parameters:
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 30
+        - name: office_code
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Expiring licenses
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  licenses:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExpiringLicense'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMetadata'
+
+  /licenses/{license_id}/reminders:
+    get:
+      summary: Get License Reminders
+      description: |
+        Retrieves reminder schedule for license.
+
+        **Business Rule:** BR-AGT-PRF-014
+
+        **Reminders:**
+        - 30 days before
+        - 15 days before
+        - 7 days before
+        - On expiry day
+      operationId: getLicenseReminders
+      tags: [License Management]
+      parameters:
+        - name: license_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reminder schedule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LicenseRemindersResponse'
+
+  /licenses/expired:
+    post:
+      summary: Trigger License Expiry Deactivation
+      description: |
+        Batch job to deactivate agents with expired licenses.
+
+        **Requirements:** FR-AGT-PRF-012, BR-AGT-PRF-013
+
+        **Actions:**
+        1. Update agent status to DEACTIVATED
+        2. Disable portal access
+        3. Stop commission processing
+        4. Send notifications
+
+        **Workflow:** WF-AGT-PRF-007
+      operationId: triggerLicenseExpiryDeactivation
+      tags: [License Management]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [batch_date]
+              properties:
+                batch_date:
+                  type: string
+                  format: date
+                dry_run:
+                  type: boolean
+                  description: If true, only report
+                  default: false
+      responses:
+        '200':
+          description: Batch completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  batch_id:
+                    type: string
+                    format: uuid
+                  batch_date:
+                    type: string
+                    format: date
+                  agents_deactivated:
+                    type: integer
+                  agent_ids:
+                    type: array
+                    items:
+                      type: string
+                  notifications_sent:
+                    type: integer
+                  dry_run:
+                    type: boolean
+
+  # ===========================================================================
+  # AGENT TERMINATION (UJ-004) - AGT-039 to AGT-041
+  # ===========================================================================
+
+  /agents/{agent_id}/terminate:
+    post:
+      summary: Terminate Agent
+      description: |
+        Terminates agent with all workflows.
+
+        **Requirements:** FR-AGT-PRF-014, BR-AGT-PRF-016, BR-AGT-PRF-017
+
+        **Actions:**
+        1. Validate termination reason (min 20 chars)
+        2. Update status to TERMINATED
+        3. Disable portal access
+        4. Stop commission processing
+        5. Generate termination letter
+        6. Archive data (7 years)
+        7. Send notifications
+
+        **Workflow:** WF-AGT-PRF-004
+      operationId: terminateAgent
+      tags: [Status Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TerminateAgentRequest'
+      responses:
+        '200':
+          description: Agent terminated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TerminateAgentResponse'
+
+  /agents/{agent_id}/termination-letter:
+    get:
+      summary: Get Termination Letter
+      description: |
+        Generates or retrieves termination letter.
+
+        **Integration:** INT-AGT-006
+      operationId: getTerminationLetter
+      tags: [Status Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [PDF, HTML]
+          default: PDF
+      responses:
+        '200':
+          description: Termination letter
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+
+  /agents/{agent_id}/reinstate:
+    post:
+      summary: Reinstate Agent
+      description: |
+        Reinstates terminated/deactivated agent.
+
+        **Requirements:** FR-AGT-PRF-013, BR-AGT-PRF-016
+
+        **Workflow:** WF-AGT-PRF-011
+      operationId: reinstateAgent
+      tags: [Status Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReinstateAgentRequest'
+      responses:
+        '200':
+          description: Reinstatement initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReinstateAgentResponse'
+
+  # ===========================================================================
+  # PORTAL AUTHENTICATION (UJ-005) - AGT-042 to AGT-046
+  # ===========================================================================
+
+  /agents/{agent_id}/portal/login:
+    post:
+      summary: Portal Login
+      description: |
+        Initiates login and sends OTP.
+
+        **Requirements:** FR-AGT-PRF-015, BR-AGT-PRF-019, BR-AGT-PRF-020
+
+        **Flow:**
+        1. Validate credentials
+        2. Check account status
+        3. Generate OTP (6 digits)
+        4. Send to mobile
+        5. OTP expiry: 10 minutes
+
+        **Account locked after 5 failed attempts**
+
+        **Workflow:** WF-AGT-PRF-005
+      operationId: agentPortalLogin
+      tags: [Authentication]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, device_info]
+              properties:
+                password:
+                  type: string
+                  format: password
+                device_info:
+                  type: object
+                  properties:
+                    device_type:
+                      type: string
+                      enum: [WEB, MOBILE_ANDROID, MOBILE_IOS]
+                    device_id:
+                      type: string
+                    ip_address:
+                      type: string
+                      format: ipv4
+      responses:
+        '200':
+          description: OTP sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginInitResponse'
+
+  /agents/{agent_id}/portal/otp/verify:
+    post:
+      summary: Verify OTP
+      description: |
+        Verifies OTP and completes authentication.
+
+        **Requirements:** FR-AGT-PRF-015, BR-AGT-PRF-019, BR-AGT-PRF-020
+      operationId: verifyOTP
+      tags: [Authentication]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [otp, transaction_id]
+              properties:
+                otp:
+                  type: string
+                  pattern: '^[0-9]{6}$'
+                transaction_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginSuccessResponse'
+
+  /agents/{agent_id}/portal/logout:
+    post:
+      summary: Portal Logout
+      description: |
+        Logs out agent and invalidates session.
+
+        **Requirement:** FR-AGT-PRF-017
+      operationId: agentPortalLogout
+      tags: [Authentication]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id]
+              properties:
+                session_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  logged_out_at:
+                    type: string
+                    format: date-time
+
+  /agents/{agent_id}/portal/unlock:
+    post:
+      summary: Unlock Account
+      description: |
+        Admin unlocks account (locked after 5 failed OTP attempts).
+
+        **Business Rule:** BR-AGT-PRF-020
+        **Error:** ERR-AGT-PRF-011
+      operationId: unlockAgentAccount
+      tags: [Authentication]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [unlock_reason, unlocked_by]
+              properties:
+                unlock_reason:
+                  type: string
+                  minLength: 10
+                unlocked_by:
+                  type: string
+                notify_agent:
+                  type: boolean
+                  default: true
+      responses:
+        '200':
+          description: Account unlocked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent_id:
+                    type: string
+                  account_status:
+                    type: string
+                  unlocked_at:
+                    type: string
+                    format: date-time
+
+  /agents/portal/session/status:
+    get:
+      summary: Get Session Status
+      description: |
+        Checks if portal session is still valid.
+
+        **Business Rules:** BR-AGT-PRF-021
+        **Error:** ERR-AGT-PRF-012
+      operationId: getPortalSessionStatus
+      tags: [Authentication]
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id:
+                    type: string
+                    format: uuid
+                  is_valid:
+                    type: boolean
+                  agent_id:
+                    type: string
+                  session_remaining_minutes:
+                    type: integer
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # License Schemas
+    AddLicenseRequest:
+      type: object
+      required:
+        - license_line
+        - license_type
+        - license_number
+        - resident_status
+        - license_date
+        - authority_date
+      properties:
+        license_line:
+          type: string
+          enum: [Life, General]
+        license_type:
+          type: string
+          enum: [Provisional, Permanent]
+        license_number:
+          type: string
+        resident_status:
+          type: string
+          enum: [Resident, Non_Resident]
+        license_date:
+          type: string
+          format: date
+        authority_date:
+          type: string
+          format: date
+        licentiate_exam_passed:
+          type: boolean
+        is_primary:
+          type: boolean
+          default: true
+
+    RenewLicenseRequest:
+      type: object
+      required:
+        - renewal_type
+        - licentiate_exam_passed
+      properties:
+        renewal_type:
+          type: string
+          enum: [PROVISIONAL, POST_EXAM, ANNUAL]
+        licentiate_exam_passed:
+          type: boolean
+        exam_date:
+          type: string
+          format: date
+        exam_certificate_number:
+          type: string
+        previous_license_id:
+          type: string
+
+    AddLicenseResponse:
+      type: object
+      properties:
+        license:
+          $ref: '#/components/schemas/License'
+        renewal_calculation:
+          type: object
+          properties:
+            license_type:
+              type: string
+            renewal_period:
+              type: string
+            reason:
+              type: string
+        reminders_scheduled:
+          type: array
+          items:
+            $ref: '#/components/schemas/LicenseReminder'
+        messages:
+          type: array
+          items:
+            type: object
+
+    License:
+      type: object
+      properties:
+        license_id:
+          type: string
+          format: uuid
+        license_number:
+          type: string
+        license_line:
+          type: string
+        license_type:
+          type: string
+        resident_status:
+          type: string
+        license_date:
+          type: string
+          format: date
+        renewal_date:
+          type: string
+          format: date
+        authority_date:
+          type: string
+          format: date
+        renewal_count:
+          type: integer
+        license_status:
+          type: string
+        is_primary:
+          type: boolean
+        days_until_expiry:
+          type: integer
+        expiry_status:
+          type: string
+          enum: [GREEN, YELLOW, RED]
+
+    LicenseReminder:
+      type: object
+      properties:
+        reminder_type:
+          type: string
+          enum: [30_days, 15_days, 7_days, expiry_day, annual_renewal]
+        scheduled_date:
+          type: string
+          format: date
+        status:
+          type: string
+          enum: [SCHEDULED, SENT, FAILED]
+
+    TerminateAgentRequest:
+      type: object
+      required:
+        - termination_reason
+        - effective_date
+        - terminated_by
+      properties:
+        termination_reason:
+          type: string
+          minLength: 20
+        termination_reason_code:
+          type: string
+          enum: [RESIGNATION, MISCONDUCT, NON_PERFORMANCE, FRAUD, OTHER]
+        effective_date:
+          type: string
+          format: date
+        generate_termination_letter:
+          type: boolean
+          default: true
+        notified:
+          type: boolean
+          default: true
+        terminated_by:
+          type: string
+
+    TerminateAgentResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        termination_status:
+          type: string
+        termination_details:
+          type: object
+        actions_performed:
+          type: array
+          items:
+            type: string
+        termination_letter_url:
+          type: string
+          format: uri
+        notifications_sent:
+          type: array
+          items:
+            type: object
+
+    ReinstateAgentRequest:
+      type: object
+      required:
+        - reinstatement_reason
+        - effective_date
+        - reinstated_by
+      properties:
+        reinstatement_reason:
+          type: string
+          minLength: 10
+        effective_date:
+          type: string
+          format: date
+        supporting_documents:
+          type: array
+          items:
+            type: string
+        reinstated_by:
+          type: string
+
+    ReinstateAgentResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        reinstatement_status:
+          type: string
+        request_id:
+          type: string
+          format: uuid
+
+    # Authentication Schemas
+    LoginInitResponse:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+        agent_name:
+          type: string
+        otp_sent_to:
+          type: string
+        otp_expires_at:
+          type: string
+          format: date-time
+        account_locked:
+          type: boolean
+
+    LoginSuccessResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        session_id:
+          type: string
+          format: uuid
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        agent_profile:
+          type: object
+
+    # Update Schemas
+    UpdateProfileSectionResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        update_status:
+          type: string
+          enum: [COMPLETED, PENDING_APPROVAL]
+        changes_applied:
+          type: object
+        audit_log:
+          type: object
+        pending_approval:
+          type: object
+        workflow_state:
+          type: object
+        notifications_sent:
+          type: array
+          items:
+            type: object
+
+    ApproveRequestResponse:
+      type: object
+      properties:
+        approval_request_id:
+          type: string
+          format: uuid
+        approval_status:
+          type: string
+        approved_at:
+          type: string
+          format: date-time
+        changes_applied:
+          type: object
+        audit_logs:
+          type: array
+          items:
+            type: object
+        notifications_sent:
+          type: array
+          items:
+            type: object
+
+    # Pagination
+    PaginationMetadata:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total_count:
+          type: integer
+        total_pages:
+          type: integer
+        has_next:
+          type: boolean
+        has_previous:
+          type: boolean
+
+    # License Response Schemas
+    AgentLicensesResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        licenses:
+          type: array
+          items:
+            $ref: '#/components/schemas/License'
+        workflow_state:
+          type: object
+        sla_tracking:
+          type: object
+
+    LicenseDetailsResponse:
+      type: object
+      properties:
+        license:
+          $ref: '#/components/schemas/License'
+        renewal_history:
+          type: array
+          items:
+            type: object
+        reminder_schedule:
+          type: array
+          items:
+            $ref: '#/components/schemas/LicenseReminder'
+
+    ExpiringLicense:
+      type: object
+      properties:
+        license_id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+        agent_name:
+          type: string
+        license_number:
+          type: string
+        license_type:
+          type: string
+        renewal_date:
+          type: string
+          format: date
+        days_until_expiry:
+          type: integer
+        agent_mobile:
+          type: string
+        agent_email:
+          type: string
+
+    LicenseRemindersResponse:
+      type: object
+      properties:
+        license_id:
+          type: string
+          format: uuid
+        reminder_schedule:
+          type: array
+          items:
+            $ref: '#/components/schemas/LicenseReminder'
+
+    # Audit Schemas
+    AuditHistoryResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        audit_logs:
+          type: array
+          items:
+            type: object
+            properties:
+              audit_id:
+                type: string
+              action:
+                type: string
+              field_name:
+                type: string
+              old_value:
+                type: string
+              new_value:
+                type: string
+              performed_by:
+                type: string
+              performed_at:
+                type: string
+                format: date-time
+              ip_address:
+                type: string
+        pagination:
+          $ref: '#/components/schemas/PaginationMetadata'
+
+    UpdateLicenseRequest:
+      type: object
+      properties:
+        license_type:
+          type: string
+          enum: [Provisional, Permanent]
+        license_number:
+          type: string
+        resident_status:
+          type: string
+          enum: [Resident, Non_Resident]
+        authority_date:
+          type: string
+          format: date
+        licentiate_exam_passed:
+          type: boolean
+
+    UpdateLicenseResponse:
+      type: object
+      properties:
+        license:
+          $ref: '#/components/schemas/License'
+        audit_log:
+          type: object
+
+    RenewLicenseResponse:
+      type: object
+      properties:
+        license:
+          $ref: '#/components/schemas/License'
+        renewal_calculation:
+          type: object
+        reminders_scheduled:
+          type: array
+          items:
+            $ref: '#/components/schemas/LicenseReminder'
+        audit_log:
+          type: object

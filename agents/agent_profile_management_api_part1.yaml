@@ -1,0 +1,1413 @@
+openapi: 3.0.3
+info:
+  title: Agent Profile Management API - Part 1
+  version: 1.0.0
+  description: |
+    **Agent Profile Management API - Complete OpenAPI 3.0 Specification**
+
+    **Module Overview:**
+    - Total APIs: 78 endpoints
+    - User Journeys: 10 complete agent lifecycle journeys
+    - Business Rules: 38 rules covered
+    - Functional Requirements: 27 requirements implemented
+    - Validation Rules: 37 validation rules applied
+    - Workflows: 12 Temporal workflows integrated
+    - Error Codes: 12 error scenarios handled
+
+    **API Distribution by Category:**
+    - Core APIs: 38 (Profile creation, updates, licenses, termination)
+    - Lookup APIs: 14 (Agent types, states, designations, office types)
+    - Validation APIs: 4 (PAN, HRMS, IFSC, office validation)
+    - Status APIs: 10 (Agent status, license expiry, audit history)
+    - Workflow APIs: 4 (Session management, save, resume, cancel)
+    - Approval APIs: 3 (Approve/reject profile updates, reinstatement)
+    - Notification APIs: 2 (Welcome notification, notification history)
+    - Document APIs: 3 (Termination letter, export, reinstatement documents)
+    - Dashboard API: 1 (Agent dashboard)
+    - System API: 1 (License deactivation batch)
+    - Webhook API: 1 (HRMS employee update)
+
+    **Part 1 Contents:**
+    - Profile Creation APIs (AGT-001 to AGT-006)
+    - Lookup APIs (AGT-007 to AGT-011)
+    - Validation APIs (AGT-012 to AGT-015)
+    - Workflow Management APIs (AGT-016 to AGT-019)
+    - Status & Notification APIs (AGT-020 to AGT-021)
+    - Agent Search & View APIs (AGT-022 to AGT-024)
+
+  contact:
+    name: API Support
+    email: api-support@postal-life-insurance.gov.in
+
+servers:
+  - url: https://api.postallifeinsurance.gov.in/v1
+    description: Production Server
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Profile Management
+    description: Agent profile creation and management
+  - name: Search & Lookup
+    description: Agent search and dropdown data
+  - name: Validation
+    description: PAN, IFSC, HRMS validation
+  - name: Workflow
+    description: Session management
+  - name: Status Management
+    description: Agent status tracking
+  - name: Notifications
+    description: Notification management
+
+paths:
+  # ===========================================================================
+  # PROFILE CREATION WORKFLOW (UJ-001) - AGT-001 to AGT-006
+  # ===========================================================================
+
+  /v1/agents/lookup/agent-types:
+    get:
+      tags:
+        - Agent Lookup
+      summary: Fetch Agent Types
+      description: |
+        Returns the list of active agent types supported by the system.
+        This API is the single source of truth for agent types.
+        Client applications must not hardcode agent type values.
+      operationId: fetchAgentTypes
+      responses:
+        '200':
+          description: Agent types retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentTypeLookupResponse'
+  
+  /agent-profiles/initiate:
+    post:
+      summary: Initiate Agent Profile Creation
+      description: |
+        Initiates agent profile creation workflow (Step 1 of UJ-001).
+
+        **Business Requirements:**
+        - FR-AGT-PRF-001: New Profile Creation
+        - BR-AGT-PRF-031: Workflow Orchestration
+        - VR-AGT-PRF-025: Profile Type Valid
+
+        **Workflow:** WF-AGT-PRF-001
+      operationId: initiateAgentProfileCreation
+      tags: [Profile Management, Workflow]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_type, initiated_by]
+              properties:
+                agent_type:
+                  type: string
+                  enum: [ADVISOR, ADVISOR_COORDINATOR, DEPARTMENTAL_EMPLOYEE, FIELD_OFFICER, DIRECT_AGENT, GDS]
+                initiated_by:
+                  type: string
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InitiateProfileResponse'
+
+  /agent-profiles/{session_id}/fetch-hrms:
+    post:
+      summary: Fetch HRMS Employee Data
+      description: |
+        Fetches employee data from HRMS (Step 2 of UJ-001).
+
+        **Requirements:** FR-AGT-PRF-002, BR-AGT-PRF-003, INT-AGT-001
+      operationId: fetchHRMSEmployeeData
+      tags: [Profile Management, Validation]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employee_id, fetch_mode]
+              properties:
+                employee_id:
+                  type: string
+                fetch_mode:
+                  type: string
+                  enum: [AUTO_HRMS, MANUAL_ENTRY]
+      responses:
+        '200':
+          description: HRMS data fetched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FetchHRMSResponse'
+
+  /advisor-coordinators:
+    get:
+      summary: Get Advisor Coordinators List
+      description: |
+        Retrieves active coordinators for advisor linkage (Step 3 of UJ-001).
+
+        **Requirements:** FR-AGT-PRF-003, BR-AGT-PRF-001, BR-AGT-PRF-002
+      operationId: getAdvisorCoordinators
+      tags: [Search & Lookup]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, INACTIVE]
+            default: ACTIVE
+        - name: circle_id
+          in: query
+          schema:
+            type: string
+        - name: division_id
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Coordinators list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdvisorCoordinatorsResponse'
+
+  /agent-profiles/{session_id}/link-coordinator:
+    post:
+      summary: Link Advisor to Coordinator
+      description: |
+        Links advisor to coordinator (Step 3 of UJ-001).
+
+        **Requirements:** FR-AGT-PRF-003, BR-AGT-PRF-001
+      operationId: linkAdvisorCoordinator
+      tags: [Profile Management]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [coordinator_id]
+              properties:
+                coordinator_id:
+                  type: string
+                linkage_effective_date:
+                  type: string
+                  format: date
+      responses:
+        '200':
+          description: Coordinator linked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkCoordinatorResponse'
+
+  /agent-profiles/{session_id}/validate-basic:
+    post:
+      summary: Validate Profile Details
+      description: |
+        Validates profile details (Step 4 of UJ-001).
+
+        **Requirements:** FR-AGT-PRF-002, BR-AGT-PRF-005 to BR-AGT-PRF-011, VR-AGT-PRF-002 to VR-AGT-PRF-030
+      operationId: validateProfileDetails
+      tags: [Profile Management, Validation]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidateProfileRequest'
+      responses:
+        '200':
+          description: Validation passed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidateProfileResponse'
+
+  /agent-profiles/{session_id}/submit:
+    post:
+      summary: Submit Profile for Creation
+      description: |
+        Final submission for profile creation (Step 5 of UJ-001).
+
+        **Requirements:** FR-AGT-PRF-001, BR-AGT-PRF-031, E-AGT-PRF-001 to E-AGT-PRF-008
+      operationId: submitProfileCreation
+      tags: [Profile Management, Workflow]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [submit_action, confirmation, submitted_by]
+              properties:
+                submit_action:
+                  type: string
+                  enum: [CREATE]
+                confirmation:
+                  type: boolean
+                submitted_by:
+                  type: string
+      responses:
+        '200':
+          description: Profile created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitProfileResponse'
+
+  # ===========================================================================
+  # LOOKUP APIS (AGT-007 to AGT-011)
+  # ===========================================================================
+
+  /agent-types:
+    get:
+      summary: Get Agent Types
+      description: |
+        Retrieves agent types dropdown.
+
+        **User Journeys:** UJ-001, UJ-004
+      operationId: getAgentTypes
+      tags: [Search & Lookup]
+      responses:
+        '200':
+          description: Agent types
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentTypesResponse'
+
+  /categories:
+    get:
+      summary: Get Categories
+      description: |
+        Retrieves categories dropdown.
+
+        **Validation:** VR-AGT-PRF-033
+      operationId: getCategories
+      tags: [Search & Lookup]
+      responses:
+        '200':
+          description: Categories
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CategoriesResponse'
+
+  /designations:
+    get:
+      summary: Get Designations
+      description: |
+        Retrieves designations dropdown.
+
+        **Validation:** VR-AGT-PRF-034
+      operationId: getDesignations
+      tags: [Search & Lookup]
+      responses:
+        '200':
+          description: Designations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DesignationsResponse'
+
+  /office-types:
+    get:
+      summary: Get Office Types
+      description: |
+        Retrieves office types dropdown.
+
+        **Business Rule:** BR-AGT-PRF-034
+      operationId: getOfficeTypes
+      tags: [Search & Lookup]
+      responses:
+        '200':
+          description: Office types
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OfficeTypesResponse'
+
+  /states:
+    get:
+      summary: Get States
+      description: |
+        Retrieves states dropdown.
+
+        **Validation:** VR-AGT-PRF-030
+      operationId: getStates
+      tags: [Search & Lookup]
+      responses:
+        '200':
+          description: States
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatesResponse'
+
+  # ===========================================================================
+  # VALIDATION APIS (AGT-012 to AGT-015)
+  # ===========================================================================
+
+  /validations/pan/check-uniqueness:
+    post:
+      summary: Check PAN Uniqueness
+      description: |
+        Validates PAN uniqueness.
+
+        **Requirements:** BR-AGT-PRF-006, VR-AGT-PRF-002
+      operationId: checkPANUniqueness
+      tags: [Validation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pan_number]
+              properties:
+                pan_number:
+                  type: string
+                  pattern: '^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
+                exclude_agent_id:
+                  type: string
+      responses:
+        '200':
+          description: PAN uniqueness result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_unique:
+                    type: boolean
+                  message:
+                    type: string
+                  existing_agent:
+                    type: object
+
+  /validations/hrms/employee-id:
+    post:
+      summary: Validate Employee ID
+      description: |
+        Validates employee ID against HRMS.
+
+        **Requirements:** BR-AGT-PRF-003, VR-AGT-PRF-023
+      operationId: validateEmployeeID
+      tags: [Validation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [employee_id]
+              properties:
+                employee_id:
+                  type: string
+      responses:
+        '200':
+          description: Employee ID validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_valid:
+                    type: boolean
+                  employee_status:
+                    type: string
+                  employee_data:
+                    type: object
+
+  /validations/bank/ifsc:
+    post:
+      summary: Validate IFSC Code
+      description: |
+        Validates IFSC and returns bank details.
+
+        **Requirements:** BR-AGT-PRF-018, VR-AGT-PRF-017
+      operationId: validateIFSC
+      tags: [Validation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ifsc_code]
+              properties:
+                ifsc_code:
+                  type: string
+                  pattern: '^[A-Z]{4}0[A-Z0-9]{6}$'
+      responses:
+        '200':
+          description: IFSC validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_valid:
+                    type: boolean
+                  bank_name:
+                    type: string
+                  branch_name:
+                    type: string
+
+  /validations/office/{office_code}:
+    get:
+      summary: Validate Office Code
+      description: |
+        Validates office code.
+
+        **Requirements:** BR-AGT-PRF-034, VR-AGT-PRF-027
+      operationId: validateOfficeCode
+      tags: [Validation]
+      parameters:
+        - name: office_code
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Office code validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_valid:
+                    type: boolean
+                  office_details:
+                    type: object
+
+  # ===========================================================================
+  # WORKFLOW MANAGEMENT (AGT-016 to AGT-019)
+  # ===========================================================================
+
+  /agent-profiles/sessions/{session_id}/status:
+    get:
+      summary: Get Session Status
+      description: Returns profile creation session status.
+      operationId: getProfileSessionStatus
+      tags: [Workflow]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusResponse'
+
+  /agent-profiles/sessions/{session_id}/save:
+    post:
+      summary: Save Session Checkpoint
+      description: Saves profile creation progress.
+      operationId: saveProfileSession
+      tags: [Workflow]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_screen, form_data]
+              properties:
+                current_screen:
+                  type: string
+                form_data:
+                  type: object
+      responses:
+        '200':
+          description: Session saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  saved:
+                    type: boolean
+                  session_expires_at:
+                    type: string
+                    format: date-time
+
+  /agent-profiles/sessions/{session_id}/resume:
+    get:
+      summary: Resume Session
+      description: Retrieves saved session data.
+      operationId: resumeProfileSession
+      tags: [Workflow]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResumeSessionResponse'
+
+  /agent-profiles/sessions/{session_id}:
+    delete:
+      summary: Cancel Session
+      description: Cancels profile creation session.
+      operationId: cancelProfileSession
+      tags: [Workflow]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cancelled:
+                    type: boolean
+                  message:
+                    type: string
+
+  # ===========================================================================
+  # STATUS & NOTIFICATION APIS (AGT-020 to AGT-021)
+  # ===========================================================================
+
+  /agent-profiles/creation-status/{agent_id}:
+    get:
+      summary: Get Creation Status
+      description: Returns agent creation status and pending tasks.
+      operationId: getAgentCreationStatus
+      tags: [Status Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Creation status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentCreationStatusResponse'
+
+  /agents/{agent_id}/notifications/resend-welcome:
+    post:
+      summary: Resend Welcome Notification
+      description: Resends welcome notification to agent.
+
+        **Integration:** INT-AGT-005
+      operationId: resendWelcomeNotification
+      tags: [Notifications]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channels:
+                  type: array
+                  items:
+                    type: string
+                    enum: [EMAIL, SMS]
+      responses:
+        '200':
+          description: Notification resent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notification_id:
+                    type: string
+                    format: uuid
+                  channels_sent:
+                    type: array
+                    items:
+                      type: string
+                  sent_at:
+                    type: string
+                    format: date-time
+
+  # ===========================================================================
+  # AGENT SEARCH & VIEW (UJ-002) - AGT-022 to AGT-024
+  # ===========================================================================
+
+  /agents/search:
+    get:
+      summary: Search Agents
+      description: |
+        Multi-criteria agent search.
+
+        **Requirements:** FR-AGT-PRF-004, BR-AGT-PRF-022
+      operationId: searchAgents
+      tags: [Search & Lookup]
+      parameters:
+        - name: agent_id
+          in: query
+          schema:
+            type: string
+        - name: name
+          in: query
+          schema:
+            type: string
+        - name: pan_number
+          in: query
+          schema:
+            type: string
+        - name: mobile_number
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, SUSPENDED, TERMINATED, DEACTIVATED]
+        - name: office_code
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSearchResponse'
+
+  /agents/{agent_id}:
+    get:
+      summary: Get Agent Profile
+      description: |
+        Retrieves complete agent profile dashboard.
+
+        **Requirements:** FR-AGT-PRF-005, BR-AGT-PRF-023
+      operationId: getAgentProfile
+      tags: [Profile Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentProfileResponse'
+
+  /agents/{agent_id}/update-form:
+    get:
+      summary: Get Update Form
+      description: |
+        Retrieves update form for specific section.
+
+        **Requirements:** FR-AGT-PRF-006 to FR-AGT-PRF-009
+      operationId: getProfileUpdateForm
+      tags: [Profile Management]
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: section
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [personal_info, address, contact, license, bank_details, status]
+      responses:
+        '200':
+          description: Update form data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileUpdateFormResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # Common Schemas
+    WorkflowState:
+      type: object
+      properties:
+        current_step:
+          type: string
+        next_step:
+          type: string
+        allowed_actions:
+          type: array
+          items:
+            type: string
+        progress_percentage:
+          type: integer
+          minimum: 0
+          maximum: 100
+
+    Message:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [INFO, SUCCESS, WARNING, ERROR]
+        code:
+          type: string
+        text:
+          type: string
+
+    Notification:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [EMAIL, SMS, INTERNAL]
+        recipient:
+          type: string
+        template:
+          type: string
+        status:
+          type: string
+          enum: [SENT, DELIVERED, FAILED]
+
+    SLATracking:
+      type: object
+      properties:
+        sla_status:
+          type: string
+          enum: [GREEN, YELLOW, RED]
+        time_elapsed_minutes:
+          type: integer
+        next_actions_due:
+          type: array
+          items:
+            type: object
+
+    PaginationMetadata:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total_count:
+          type: integer
+        total_pages:
+          type: integer
+        has_next:
+          type: boolean
+        has_previous:
+          type: boolean
+   
+    AgentTypeLookupResponse:
+      type: object
+      properties:
+        agentTypes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentType'
+
+    AgentType:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Unique agent type code
+        description:
+          type: string
+          description: Human-readable description
+        active:
+          type: boolean
+          description: Indicates whether the agent type is active
+
+    # Request/Response Schemas
+    InitiateProfileResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        workflow_state:
+          $ref: '#/components/schemas/WorkflowState'
+        agent_type:
+          type: string
+        session_expires_at:
+          type: string
+          format: date-time
+        required_fields:
+          type: object
+          properties:
+            mandatory_sections:
+              type: array
+              items:
+                type: string
+            conditional_sections:
+              type: array
+              items:
+                type: object
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+
+    FetchHRMSResponse:
+      type: object
+      properties:
+        employee_data:
+          type: object
+          properties:
+            employee_id:
+              type: string
+            full_name:
+              type: string
+            date_of_birth:
+              type: string
+              format: date
+            designation:
+              type: string
+            office_name:
+              type: string
+            office_code:
+              type: string
+            email:
+              type: string
+              format: email
+            mobile:
+              type: string
+        workflow_state:
+          $ref: '#/components/schemas/WorkflowState'
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+
+    AdvisorCoordinatorsResponse:
+      type: object
+      properties:
+        coordinators:
+          type: array
+          items:
+            type: object
+            properties:
+              coordinator_id:
+                type: string
+              name:
+                type: string
+              designation:
+                type: string
+              office_code:
+                type: string
+              status:
+                type: string
+        pagination:
+          $ref: '#/components/schemas/PaginationMetadata'
+
+    LinkCoordinatorResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        linked_coordinator_id:
+          type: string
+        workflow_state:
+          $ref: '#/components/schemas/WorkflowState'
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+
+    ValidateProfileResponse:
+      type: object
+      properties:
+        is_valid:
+          type: boolean
+        validation_results:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              status:
+                type: string
+                enum: [VALID, INVALID, WARNING]
+              message:
+                type: string
+        workflow_state:
+          $ref: '#/components/schemas/WorkflowState'
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+
+    SubmitProfileResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        status:
+          type: string
+        creation_date:
+          type: string
+          format: date-time
+        workflow_state:
+          $ref: '#/components/schemas/WorkflowState'
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+
+    SessionStatusResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [ACTIVE, EXPIRED, COMPLETED, CANCELLED]
+        workflow_state:
+          $ref: '#/components/schemas/WorkflowState'
+        last_saved_at:
+          type: string
+          format: date-time
+
+    ResumeSessionResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        agent_type:
+          type: string
+        form_data:
+          type: object
+        workflow_state:
+          $ref: '#/components/schemas/WorkflowState'
+
+    AgentCreationStatusResponse:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        status:
+          type: string
+        current_stage:
+          type: string
+        verification_status:
+          type: object
+          properties:
+            pan_verified:
+              type: boolean
+            hrms_verified:
+              type: boolean
+            office_verified:
+              type: boolean
+        sla_tracking:
+          $ref: '#/components/schemas/SLATracking'
+
+    ProfileUpdateFormResponse:
+      type: object
+      properties:
+        section:
+          type: string
+        fields:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              label:
+                type: string
+              type:
+                type: string
+              current_value:
+                type: string
+              options:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    label:
+                      type: string
+                    value:
+                      type: string
+              validation_rules:
+                type: object
+
+    ValidateProfileRequest:
+      type: object
+      required: [personal_info, addresses, contacts, emails, office_association]
+      properties:
+        personal_info:
+          $ref: '#/components/schemas/PersonalInfo'
+        addresses:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+        contacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Contact'
+        emails:
+          type: array
+          items:
+            $ref: '#/components/schemas/Email'
+        office_association:
+          $ref: '#/components/schemas/OfficeAssociation'
+
+    PersonalInfo:
+      type: object
+      properties:
+        title:
+          type: string
+          enum: [Mr, Mrs, Ms, Dr]
+        first_name:
+          type: string
+          minLength: 2
+          maxLength: 50
+        middle_name:
+          type: string
+          maxLength: 50
+        last_name:
+          type: string
+          minLength: 2
+          maxLength: 50
+        date_of_birth:
+          type: string
+          format: date
+        gender:
+          type: string
+          enum: [Male, Female, Other]
+        marital_status:
+          type: string
+          enum: [Single, Married, Widowed, Divorced]
+        category:
+          type: string
+          enum: [General, OBC, SC, ST]
+        aadhar_number:
+          type: string
+          pattern: '^[0-9]{12}$'
+        pan_number:
+          type: string
+          pattern: '^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
+        designation_rank:
+          type: string
+        person_type:
+          type: string
+          enum: [INDIVIDUAL, CORPORATE]
+
+    Address:
+      type: object
+      required: [address_type, address_line1, city, state, pincode]
+      properties:
+        address_type:
+          type: string
+          enum: [PERMANENT, COMMUNICATION, OFFICIAL]
+        address_line1:
+          type: string
+          maxLength: 100
+        address_line2:
+          type: string
+          maxLength: 100
+        village:
+          type: string
+          maxLength: 50
+        taluka:
+          type: string
+          maxLength: 50
+        city:
+          type: string
+          maxLength: 50
+        district:
+          type: string
+          maxLength: 50
+        state:
+          type: string
+          maxLength: 50
+        country:
+          type: string
+          maxLength: 50
+          default: India
+        pincode:
+          type: string
+          pattern: '^[0-9]{6}$'
+        is_same_as_permanent:
+          type: boolean
+          default: false
+
+    Contact:
+      type: object
+      required: [contact_type, contact_number]
+      properties:
+        contact_type:
+          type: string
+          enum: [mobile, alternate_mobile, landline]
+        contact_number:
+          type: string
+          pattern: '^[6-9][0-9]{9}$'
+        is_primary:
+          type: boolean
+
+    Email:
+      type: object
+      required: [email_type, email_address]
+      properties:
+        email_type:
+          type: string
+          enum: [official, personal]
+        email_address:
+          type: string
+          format: email
+        is_primary:
+          type: boolean
+
+    OfficeAssociation:
+      type: object
+      required: [office_type, office_code]
+      properties:
+        office_type:
+          type: string
+          enum: [Head Office, Circle Office, Divisional Office, Sub-Office]
+        office_code:
+          type: string
+        circle_id:
+          type: string
+        division_id:
+          type: string
+
+    AgentSearchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentSearchResult'
+        pagination:
+          $ref: '#/components/schemas/PaginationMetadata'
+
+    AgentSearchResult:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        name:
+          type: string
+        agent_type:
+          type: string
+        pan:
+          type: string
+        mobile:
+          type: string
+        email:
+          type: string
+        status:
+          type: string
+        advisor_coordinator:
+          type: string
+        office:
+          type: string
+
+    AgentProfileResponse:
+      type: object
+      properties:
+        agent_profile:
+          type: object
+          properties:
+            agent_id:
+              type: string
+            profile_type:
+              type: string
+            full_name:
+              type: string
+            pan_number:
+              type: string
+            status:
+              type: string
+            personal_info:
+              $ref: '#/components/schemas/PersonalInfo'
+            addresses:
+              type: array
+              items:
+                $ref: '#/components/schemas/Address'
+            contacts:
+              type: array
+              items:
+                $ref: '#/components/schemas/Contact'
+            emails:
+              type: array
+              items:
+                $ref: '#/components/schemas/Email'
+            office:
+              $ref: '#/components/schemas/OfficeAssociation'
+        workflow_state:
+          $ref: '#/components/schemas/WorkflowState'
+
+    # Lookup Response Schemas
+    AgentTypesResponse:
+      type: object
+      properties:
+        agent_types:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              name:
+                type: string
+              description:
+                type: string
+
+    CategoriesResponse:
+      type: object
+      properties:
+        categories:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              name:
+                type: string
+
+    DesignationsResponse:
+      type: object
+      properties:
+        designations:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              name:
+                type: string
+
+    OfficeTypesResponse:
+      type: object
+      properties:
+        office_types:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              name:
+                type: string
+
+    StatesResponse:
+      type: object
+      properties:
+        states:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+              name:
+                type: string
