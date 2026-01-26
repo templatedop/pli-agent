@@ -193,6 +193,96 @@ SELECT fl.*, (SELECT count FROM total_count)
 
 ---
 
+## 🔧 Framework Pattern Fixes Applied
+
+**Commit**: `1df2471` - Applied proper dblib patterns and combined operations
+
+### Repository Fixes (`repo/postgres/agent_profile.go`)
+
+1. **SearchAgents (AGT-022)** - Rewritten for single database round trip:
+   ```go
+   // BEFORE: Used raw db.Query
+   // AFTER: Uses Squirrel + dblib.QueueReturn/QueueReturnRow with batch
+   batch := &pgx.Batch{}
+   dbutil.QueueReturnRow(batch, countQuery, pgx.RowTo[int64], &totalCount)
+   dbutil.QueueReturn(batch, dataQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &agents)
+   r.db.SendBatch(cCtx, batch).Close()
+   // Count + paginated data in ONE round trip
+   ```
+
+2. **GetAgentProfileWithDetails (AGT-023)** - Documented complex JSON aggregation:
+   - Kept raw SQL due to complex CTE with JSON aggregation
+   - Added clear documentation explaining why raw SQL is necessary
+
+3. **GetAgentUpdateFormData (AGT-024)** - Uses proper dblib patterns:
+   - Changed from `db.QueryRow` to proper query builder patterns
+
+4. **CreateApprovalRequestWithChanges (NEW)** - Single operation for approval creation:
+   ```go
+   // BEFORE: Handler called approvalRepo.Create() separately (2 round trips)
+   // AFTER: Single method in profileRepo creates approval request
+   insertQuery := dblib.Psql.Insert("approval_requests")...
+   err = dblib.SelectOne(cCtx, r.db, insertQuery, pgx.RowTo[string], &approvalRequestID)
+   // Single database round trip
+   ```
+
+5. **ApproveAndApplyProfileChangesReturning (NEW)** - CTE for combined approval + update:
+   ```sql
+   -- BEFORE: Handler called approvalRepo.ApproveReturning() + UpdateAgentPersonalInfoReturning() (2 round trips)
+   -- AFTER: Single CTE query that combines both operations
+   WITH updated_approval AS (
+       UPDATE approval_requests SET status = 'APPROVED' ... RETURNING agent_id, requested_changes
+   ),
+   changes_parsed AS (
+       SELECT agent_id, requested_changes::jsonb as changes FROM updated_approval
+   ),
+   updated_profile AS (
+       UPDATE agent_profiles ap SET first_name = COALESCE(...) FROM changes_parsed
+       WHERE ap.agent_id = cp.agent_id RETURNING ap.*
+   )
+   SELECT * FROM updated_profile
+   -- Approval + profile update in ONE round trip
+   ```
+
+### Handler Fixes (`handler/profile_update.go`)
+
+1. **UpdateProfileSection (AGT-025)** - Uses combined repository method:
+   ```go
+   // BEFORE: Two separate calls
+   // approvalReq, err := h.approvalRepo.Create(...)
+   // profile, err := h.profileRepo.UpdateAgentPersonalInfoReturning(...)
+
+   // AFTER: Single call
+   approvalRequestID, err := h.profileRepo.CreateApprovalRequestWithChanges(
+       sctx.Ctx, req.AgentID, req.Section, req.Changes, req.UpdatedBy,
+   )
+   // Single database round trip
+   ```
+
+2. **ApproveProfileUpdate (AGT-026)** - Uses CTE for combined operation:
+   ```go
+   // BEFORE: Two separate calls
+   // approval, err := h.approvalRepo.ApproveReturning(...)
+   // profile, err := h.profileRepo.UpdateAgentPersonalInfoReturning(...)
+
+   // AFTER: Single CTE call
+   updatedProfile, err := h.profileRepo.ApproveAndApplyProfileChangesReturning(
+       sctx.Ctx, req.ApprovalRequestID, req.ReviewedBy, req.ReviewComments,
+   )
+   // Single database round trip using CTE
+   ```
+
+### Key Improvements
+
+✅ **SearchAgents**: Raw `db.Query` → Squirrel + `dblib.QueueReturn` with batch
+✅ **UpdateProfileSection**: 2 DB calls → 1 DB call with combined method
+✅ **ApproveProfileUpdate**: 2 DB calls → 1 DB call with CTE pattern
+✅ **Type Safety**: All queries use proper Squirrel builder with type-safe row mapping
+✅ **Error Handling**: Consistent error wrapping with fmt.Errorf
+✅ **Code Quality**: Clear comments documenting CRITICAL single-trip patterns
+
+---
+
 ## 🎓 Key Implementation Highlights
 
 ### Approval Workflow
