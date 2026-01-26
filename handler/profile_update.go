@@ -214,6 +214,12 @@ func (h *AgentProfileUpdateHandler) GetUpdateForm(sctx *serverRoute.Context, req
 // FR-AGT-PRF-006: Personal Information Update
 // BR-AGT-PRF-005: Name Update with Audit Logging
 // BR-AGT-PRF-006: PAN Update with Format and Uniqueness Validation
+
+// UpdateProfileSection updates a specific section of agent profile
+// AGT-025: Update Profile Section
+// FR-AGT-PRF-006: Personal Information Update
+// BR-AGT-PRF-005: Name Update with Audit Logging
+// BR-AGT-PRF-006: PAN Update with Format and Uniqueness Validation
 func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Context, req UpdateProfileSectionRequest) (*resp.UpdateProfileResponse, error) {
 	log.Info(sctx.Ctx, "Updating profile section for agent: %s, section: %s", req.AgentID, req.Section)
 
@@ -230,23 +236,21 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 	}
 
 	if requiresApproval {
-		// Create approval request
-		changesJSON, _ := json.Marshal(req.Changes)
-		approvalReq := domain.ApprovalRequest{
-			AgentID:          req.AgentID,
-			Section:          req.Section,
-			RequestedChanges: string(changesJSON),
-			RequestedBy:      req.UpdatedBy,
-			Status:           domain.ApprovalStatusPending,
-		}
-
-		createdApproval, err := h.approvalRepo.Create(sctx.Ctx, approvalReq)
+		// Create approval request using combined repository method
+		// CRITICAL: Single database round trip
+		approvalRequestID, err := h.profileRepo.CreateApprovalRequestWithChanges(
+			sctx.Ctx,
+			req.AgentID,
+			req.Section,
+			req.Changes,
+			req.UpdatedBy,
+		)
 		if err != nil {
 			log.Error(sctx.Ctx, "Error creating approval request: %v", err)
 			return nil, err
 		}
 
-		log.Info(sctx.Ctx, "Created approval request: %s", createdApproval.ApprovalRequestID)
+		log.Info(sctx.Ctx, "Created approval request: %s", approvalRequestID)
 
 		return &resp.UpdateProfileResponse{
 			StatusCodeAndMessage: port.StatusCodeAndMessage{
@@ -254,7 +258,7 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 				Message:    "Update requires approval. Approval request created.",
 			},
 			ApprovalRequired:  true,
-			ApprovalRequestID: &createdApproval.ApprovalRequestID,
+			ApprovalRequestID: &approvalRequestID,
 			Status:            "PENDING_APPROVAL",
 		}, nil
 	}
@@ -272,6 +276,9 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 				if newValue, exists := change["new_value"]; exists {
 					updateMap[field] = newValue
 				}
+			} else {
+				// If not in change object format, use directly
+				updateMap[field] = changeObj
 			}
 		}
 
@@ -304,53 +311,20 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 
 // ApproveProfileUpdate approves a pending profile update request
 // AGT-026: Approve Profile Update
-// CRITICAL: Single atomic operation
+// CRITICAL: Single database round trip using CTE to combine approval + profile update
 func (h *AgentProfileUpdateHandler) ApproveProfileUpdate(sctx *serverRoute.Context, req ApprovalActionRequest) (*resp.ApprovalActionResponse, error) {
 	log.Info(sctx.Ctx, "Approving profile update request: %s by %s", req.ApprovalRequestID, req.ReviewedBy)
 
-	// Approve the request - single atomic UPDATE...RETURNING
-	approvedRequest, err := h.approvalRepo.ApproveReturning(
+	// Approve and apply changes in single database round trip using CTE
+	// CRITICAL: Combined operation - approval update + profile update in ONE query
+	updatedProfile, err := h.profileRepo.ApproveAndApplyProfileChangesReturning(
 		sctx.Ctx,
 		req.ApprovalRequestID,
 		req.ReviewedBy,
 		req.ReviewComments,
 	)
 	if err != nil {
-		log.Error(sctx.Ctx, "Error approving request: %v", err)
-		return nil, err
-	}
-
-	// Apply the approved changes to agent profile
-	var changes map[string]interface{}
-	if err := json.Unmarshal([]byte(approvedRequest.RequestedChanges), &changes); err != nil {
-		return nil, fmt.Errorf("failed to parse requested changes: %w", err)
-	}
-
-	// Extract update map
-	updateMap := make(map[string]interface{})
-	for field, changeObj := range changes {
-		if change, ok := changeObj.(map[string]interface{}); ok {
-			if newValue, exists := change["new_value"]; exists {
-				updateMap[field] = newValue
-			}
-		}
-	}
-
-	// Apply updates based on section
-	switch approvedRequest.Section {
-	case "personal_info":
-		_, err = h.profileRepo.UpdateAgentPersonalInfoReturning(
-			sctx.Ctx,
-			approvedRequest.AgentID,
-			updateMap,
-			req.ReviewedBy,
-		)
-	default:
-		return nil, fmt.Errorf("section update not implemented: %s", approvedRequest.Section)
-	}
-
-	if err != nil {
-		log.Error(sctx.Ctx, "Error applying approved changes: %v", err)
+		log.Error(sctx.Ctx, "Error approving and applying changes: %v", err)
 		return nil, err
 	}
 
@@ -361,16 +335,12 @@ func (h *AgentProfileUpdateHandler) ApproveProfileUpdate(sctx *serverRoute.Conte
 			StatusCode: "APPROVAL_SUCCESS",
 			Message:    "Profile update approved and applied successfully",
 		},
-		ApprovalRequestID: approvedRequest.ApprovalRequestID,
-		Status:            string(approvedRequest.Status),
-		ReviewedBy:        approvedRequest.ReviewedBy.String,
-		ReviewedAt:        &approvedRequest.ReviewedAt.Time,
+		ApprovalRequestID: req.ApprovalRequestID,
+		Status:            "APPROVED",
+		ReviewedBy:        req.ReviewedBy,
+		ReviewedAt:        &updatedProfile.UpdatedAt.Time,
 	}, nil
 }
-
-// RejectProfileUpdate rejects a pending profile update request
-// AGT-027: Reject Profile Update
-// CRITICAL: Single atomic operation
 func (h *AgentProfileUpdateHandler) RejectProfileUpdate(sctx *serverRoute.Context, req ApprovalActionRequest) (*resp.ApprovalActionResponse, error) {
 	log.Info(sctx.Ctx, "Rejecting profile update request: %s by %s", req.ApprovalRequestID, req.ReviewedBy)
 
