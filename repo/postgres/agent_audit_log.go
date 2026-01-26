@@ -434,3 +434,70 @@ func (r *AgentAuditLogRepository) FindByPerformedBy(ctx context.Context, perform
 
 	return auditLogs, nil
 }
+
+// GetAuditHistoryWithCount retrieves audit history for an agent with pagination
+// AGT-028: Get Audit History
+// FR-AGT-PRF-022: Audit History Tracking
+// CRITICAL: Single database round trip with CTE for count + data
+func (r *AgentAuditLogRepository) GetAuditHistoryWithCount(
+	ctx context.Context,
+	agentID string,
+	page, limit int,
+) ([]domain.AgentAuditLog, int64, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
+	defer cancel()
+
+	// Calculate offset
+	offset := (page - 1) * limit
+
+	// Use CTE to combine audit logs with total count in single query
+	sql := `
+		WITH filtered_logs AS (
+			SELECT *
+			FROM agent_audit_logs
+			WHERE agent_id = $1
+			ORDER BY performed_at DESC
+			LIMIT $2 OFFSET $3
+		),
+		total_count AS (
+			SELECT COUNT(*) as count
+			FROM agent_audit_logs
+			WHERE agent_id = $1
+		)
+		SELECT fl.*, (SELECT count FROM total_count) as total_count
+		FROM filtered_logs fl
+		ORDER BY fl.performed_at DESC
+	`
+
+	rows, err := r.db.Query(cCtx, sql, agentID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get audit history: %w", err)
+	}
+	defer rows.Close()
+
+	var auditLogs []domain.AgentAuditLog
+	var totalCount int64
+
+	for rows.Next() {
+		var log domain.AgentAuditLog
+		var count int64
+		err := rows.Scan(
+			&log.AuditID, &log.AgentID, &log.ActionType, &log.ActionReason,
+			&log.FieldName, &log.OldValue, &log.NewValue, &log.PerformedBy,
+			&log.PerformedAt, &log.IPAddress, &log.UserAgent, &log.CreatedAt,
+			&count,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan audit log: %w", err)
+		}
+
+		auditLogs = append(auditLogs, log)
+		totalCount = count
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error iterating audit logs: %w", err)
+	}
+
+	return auditLogs, totalCount, nil
+}

@@ -28,6 +28,7 @@ var FxRepo = fx.Module(
 		repo.NewAgentLicenseRepository,
 		repo.NewAgentAuditLogRepository,
 		repo.NewAgentProfileSessionRepository, // Phase 5: Session management
+		repo.NewApprovalRequestRepository,     // Phase 6: Approval workflow
 		// Add more repository constructors here as needed
 	),
 )
@@ -63,7 +64,13 @@ var FxHandler = fx.Module(
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// TODO: PHASE 6 - Add profile update handlers
+		// PHASE 6: Profile Update & Approval (AGT-022 to AGT-028)
+		// Agent Profile Update Handler - Search, View, Update, Approve/Reject, Audit
+		fx.Annotate(
+			handler.NewAgentProfileUpdateHandler,
+			fx.As(new(serverHandler.Handler)),
+			fx.ResultTags(serverHandler.ServerControllersGroupTag),
+		),
 		// TODO: PHASE 7 - Add license management handlers
 		// TODO: PHASE 8 - Add status management handlers
 		// TODO: PHASE 9 - Add search and dashboard handlers

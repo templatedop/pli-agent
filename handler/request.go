@@ -123,3 +123,65 @@ type SubmitProfileRequest struct {
 	SessionID   string `uri:"session_id" validate:"required,uuid4"`
 	SubmittedBy string `json:"submitted_by" validate:"required"`
 }
+
+// ==================== PHASE 6: PROFILE UPDATE APIs (AGT-022 to AGT-028) ====================
+
+// SearchAgentsQuery query params for agent search
+// AGT-022: Multi-criteria Agent Search
+// FR-AGT-PRF-004: Agent Search Functionality
+// BR-AGT-PRF-022: Multi-Criteria Search Support
+type SearchAgentsQuery struct {
+	AgentID      string `query:"agent_id" validate:"omitempty,uuid4"`
+	Name         string `query:"name" validate:"omitempty"`
+	PANNumber    string `query:"pan_number" validate:"omitempty,len=10"`
+	MobileNumber string `query:"mobile_number" validate:"omitempty,len=10"`
+	Status       string `query:"status" validate:"omitempty,oneof=ACTIVE SUSPENDED TERMINATED DEACTIVATED"`
+	OfficeCode   string `query:"office_code" validate:"omitempty"`
+	Page         int    `query:"page" validate:"omitempty,min=1"`
+	Limit        int    `query:"limit" validate:"omitempty,min=1,max=100"`
+}
+
+// AgentIDURI uri param for agent ID
+// AGT-023: Get Agent Profile
+type AgentIDURI struct {
+	AgentID string `uri:"agent_id" validate:"required,uuid4"`
+}
+
+// GetUpdateFormRequest request for getting update form
+// AGT-024: Get Profile Update Form
+// FR-AGT-PRF-006: Personal Information Update
+type GetUpdateFormRequest struct {
+	AgentID string `uri:"agent_id" validate:"required,uuid4"`
+	Section string `query:"section" validate:"required,oneof=personal_info address contact license bank_details status"`
+}
+
+// UpdateProfileSectionRequest request for updating profile section
+// AGT-025: Update Profile Section
+// FR-AGT-PRF-006: Personal Information Update
+// BR-AGT-PRF-005: Name Update with Audit Logging
+// BR-AGT-PRF-006: PAN Update with Format and Uniqueness Validation
+type UpdateProfileSectionRequest struct {
+	AgentID      string                 `uri:"agent_id" validate:"required,uuid4"`
+	Section      string                 `uri:"section" validate:"required,oneof=personal_info address contact license bank_details status"`
+	Changes      map[string]interface{} `json:"changes" validate:"required"`
+	UpdateReason string                 `json:"update_reason" validate:"omitempty,min=10"`
+	UpdatedBy    string                 `json:"updated_by" validate:"required"`
+}
+
+// ApprovalActionRequest request for approve/reject actions
+// AGT-026: Approve Profile Update
+// AGT-027: Reject Profile Update
+type ApprovalActionRequest struct {
+	ApprovalRequestID string  `uri:"approval_request_id" validate:"required,uuid4"`
+	ReviewedBy        string  `json:"reviewed_by" validate:"required"`
+	ReviewComments    *string `json:"review_comments" validate:"omitempty"`
+}
+
+// GetAuditHistoryRequest request for fetching audit history
+// AGT-028: Get Audit History
+// FR-AGT-PRF-022: Audit History Tracking
+type GetAuditHistoryRequest struct {
+	AgentID string `uri:"agent_id" validate:"required,uuid4"`
+	Page    int    `query:"page" validate:"omitempty,min=1"`
+	Limit   int    `query:"limit" validate:"omitempty,min=1,max=100"`
+}

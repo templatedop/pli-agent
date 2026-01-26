@@ -620,3 +620,377 @@ func (r *AgentProfileRepository) CreateWithRelatedEntities(ctx context.Context, 
 
 	return &result, nil
 }
+
+// SearchAgents performs multi-criteria agent search
+// AGT-022: Multi-criteria Agent Search
+// FR-AGT-PRF-004: Agent Search Functionality
+// BR-AGT-PRF-022: Multi-Criteria Search Support
+func (r *AgentProfileRepository) SearchAgents(
+	ctx context.Context,
+	agentID, name, panNumber, mobileNumber, status, officeCode string,
+	page, limit int,
+) ([]domain.AgentProfile, int64, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	// Build WHERE conditions dynamically
+	where := sq.And{sq.Eq{"deleted_at": nil}}
+	if agentID != "" {
+		where = append(where, sq.Eq{"agent_id": agentID})
+	}
+	if name != "" {
+		where = append(where, sq.Or{
+			sq.ILike{"first_name": "%" + name + "%"},
+			sq.ILike{"last_name": "%" + name + "%"},
+		})
+	}
+	if panNumber != "" {
+		where = append(where, sq.Eq{"pan_number": panNumber})
+	}
+	if status != "" {
+		where = append(where, sq.Eq{"status": status})
+	}
+	if officeCode != "" {
+		where = append(where, sq.Eq{"office_code": officeCode})
+	}
+
+	// For mobile number, need to join with contacts table
+	// Using CTE to combine search with count in single round trip
+	// CRITICAL: Single database round trip for performance
+	sql := `
+		WITH filtered_agents AS (
+			SELECT DISTINCT ap.agent_id
+			FROM agent_profiles ap
+			LEFT JOIN agent_contacts ac ON ap.agent_id = ac.agent_id AND ac.deleted_at IS NULL
+			WHERE ap.deleted_at IS NULL
+				AND ($1::uuid IS NULL OR ap.agent_id = $1::uuid)
+				AND ($2::text IS NULL OR ap.first_name ILIKE '%' || $2 || '%' OR ap.last_name ILIKE '%' || $2 || '%')
+				AND ($3::text IS NULL OR ap.pan_number = $3)
+				AND ($4::text IS NULL OR ac.contact_number = $4)
+				AND ($5::text IS NULL OR ap.status::text = $5)
+				AND ($6::text IS NULL OR ap.office_code = $6)
+			ORDER BY ap.created_at DESC
+			LIMIT $7 OFFSET $8
+		),
+		total_count AS (
+			SELECT COUNT(DISTINCT ap.agent_id) as count
+			FROM agent_profiles ap
+			LEFT JOIN agent_contacts ac ON ap.agent_id = ac.agent_id AND ac.deleted_at IS NULL
+			WHERE ap.deleted_at IS NULL
+				AND ($1::uuid IS NULL OR ap.agent_id = $1::uuid)
+				AND ($2::text IS NULL OR ap.first_name ILIKE '%' || $2 || '%' OR ap.last_name ILIKE '%' || $2 || '%')
+				AND ($3::text IS NULL OR ap.pan_number = $3)
+				AND ($4::text IS NULL OR ac.contact_number = $4)
+				AND ($5::text IS NULL OR ap.status::text = $5)
+				AND ($6::text IS NULL OR ap.office_code = $6)
+		)
+		SELECT ap.*, (SELECT count FROM total_count) as total_count
+		FROM agent_profiles ap
+		INNER JOIN filtered_agents fa ON ap.agent_id = fa.agent_id
+		ORDER BY ap.created_at DESC
+	`
+
+	// Convert empty strings to nil for SQL
+	var agentIDPtr, namePtr, panPtr, mobilePtr, statusPtr, officePtr *string
+	if agentID != "" {
+		agentIDPtr = &agentID
+	}
+	if name != "" {
+		namePtr = &name
+	}
+	if panNumber != "" {
+		panPtr = &panNumber
+	}
+	if mobileNumber != "" {
+		mobilePtr = &mobileNumber
+	}
+	if status != "" {
+		statusPtr = &status
+	}
+	if officeCode != "" {
+		officePtr = &officeCode
+	}
+
+	// Calculate offset
+	offset := (page - 1) * limit
+
+	rows, err := r.db.Query(cCtx, sql, agentIDPtr, namePtr, panPtr, mobilePtr, statusPtr, officePtr, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to search agents: %w", err)
+	}
+	defer rows.Close()
+
+	var agents []domain.AgentProfile
+	var totalCount int64
+
+	for rows.Next() {
+		var agent domain.AgentProfile
+		var count int64
+		err := rows.Scan(
+			&agent.AgentID, &agent.AgentCode, &agent.AgentType, &agent.EmployeeID,
+			&agent.OfficeCode, &agent.CircleID, &agent.DivisionID, &agent.AdvisorCoordinatorID,
+			&agent.Title, &agent.FirstName, &agent.MiddleName, &agent.LastName,
+			&agent.Gender, &agent.DateOfBirth, &agent.Category, &agent.MaritalStatus,
+			&agent.AadharNumber, &agent.PANNumber, &agent.DesignationRank,
+			&agent.ServiceNumber, &agent.ProfessionalTitle, &agent.Status,
+			&agent.StatusDate, &agent.StatusReason, &agent.DistributionChannel,
+			&agent.ProductClass, &agent.ExternalIdentificationNumber,
+			&agent.WorkflowState, &agent.CreatedAt, &agent.CreatedBy,
+			&agent.UpdatedAt, &agent.UpdatedBy, &agent.DeletedAt, &agent.Version,
+			&count,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to scan agent: %w", err)
+		}
+
+		agents = append(agents, agent)
+		totalCount = count
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error iterating agents: %w", err)
+	}
+
+	return agents, totalCount, nil
+}
+
+// GetAgentProfileWithDetails retrieves complete agent profile with related data
+// AGT-023: Get Agent Profile Details
+// FR-AGT-PRF-005: Profile Dashboard View
+// BR-AGT-PRF-023: Dashboard Profile View
+// CRITICAL: Single database round trip using JSON aggregation
+func (r *AgentProfileRepository) GetAgentProfileWithDetails(ctx context.Context, agentID string) (map[string]interface{}, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	// Use CTE and JSON aggregation to fetch profile + addresses + contacts + emails in single query
+	sql := `
+		WITH profile_data AS (
+			SELECT * FROM agent_profiles WHERE agent_id = $1 AND deleted_at IS NULL
+		),
+		addresses_data AS (
+			SELECT COALESCE(
+				json_agg(
+					json_build_object(
+						'address_id', address_id,
+						'address_type', address_type,
+						'address_line1', address_line1,
+						'address_line2', address_line2,
+						'address_line3', address_line3,
+						'city', city,
+						'district', district,
+						'state', state,
+						'country', country,
+						'pincode', pincode,
+						'is_primary', is_primary,
+						'valid_from', valid_from,
+						'valid_to', valid_to
+					) ORDER BY is_primary DESC, created_at
+				),
+				'[]'::json
+			) as addresses
+			FROM agent_addresses
+			WHERE agent_id = $1 AND deleted_at IS NULL
+		),
+		contacts_data AS (
+			SELECT COALESCE(
+				json_agg(
+					json_build_object(
+						'contact_id', contact_id,
+						'contact_type', contact_type,
+						'contact_number', contact_number,
+						'is_primary', is_primary,
+						'is_verified', is_verified,
+						'verified_at', verified_at
+					) ORDER BY is_primary DESC, created_at
+				),
+				'[]'::json
+			) as contacts
+			FROM agent_contacts
+			WHERE agent_id = $1 AND deleted_at IS NULL
+		),
+		emails_data AS (
+			SELECT COALESCE(
+				json_agg(
+					json_build_object(
+						'email_id', email_id,
+						'email_address', email_address,
+						'is_primary', is_primary,
+						'is_verified', is_verified,
+						'verified_at', verified_at
+					) ORDER BY is_primary DESC, created_at
+				),
+				'[]'::json
+			) as emails
+			FROM agent_emails
+			WHERE agent_id = $1 AND deleted_at IS NULL
+		)
+		SELECT
+			json_build_object(
+				'profile', row_to_json(pd.*),
+				'addresses', ad.addresses,
+				'contacts', cd.contacts,
+				'emails', ed.emails
+			) as result
+		FROM profile_data pd
+		CROSS JOIN addresses_data ad
+		CROSS JOIN contacts_data cd
+		CROSS JOIN emails_data ed
+	`
+
+	var resultJSON string
+	err := r.db.QueryRow(cCtx, sql, agentID).Scan(&resultJSON)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("agent not found: %s", agentID)
+		}
+		return nil, fmt.Errorf("failed to get agent profile: %w", err)
+	}
+
+	// Parse JSON result into map
+	var result map[string]interface{}
+	err = dbutil.UnmarshalJSON([]byte(resultJSON), &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal profile data: %w", err)
+	}
+
+	return result, nil
+}
+
+// GetAgentUpdateFormData retrieves data for updating a specific section
+// AGT-024: Get Profile Update Form
+// FR-AGT-PRF-006: Personal Information Update
+// Returns section-specific data for form population
+func (r *AgentProfileRepository) GetAgentUpdateFormData(ctx context.Context, agentID, section string) (map[string]interface{}, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	var sql string
+	switch section {
+	case "personal_info":
+		sql = `
+			SELECT json_build_object(
+				'agent_id', agent_id,
+				'title', title,
+				'first_name', first_name,
+				'middle_name', middle_name,
+				'last_name', last_name,
+				'gender', gender,
+				'date_of_birth', date_of_birth,
+				'category', category,
+				'marital_status', marital_status,
+				'aadhar_number', aadhar_number,
+				'pan_number', pan_number,
+				'version', version
+			) as result
+			FROM agent_profiles
+			WHERE agent_id = $1 AND deleted_at IS NULL
+		`
+	case "address":
+		sql = `
+			SELECT COALESCE(
+				json_agg(
+					json_build_object(
+						'address_id', address_id,
+						'address_type', address_type,
+						'address_line1', address_line1,
+						'address_line2', address_line2,
+						'address_line3', address_line3,
+						'city', city,
+						'district', district,
+						'state', state,
+						'country', country,
+						'pincode', pincode,
+						'is_primary', is_primary,
+						'version', version
+					)
+				),
+				'[]'::json
+			) as result
+			FROM agent_addresses
+			WHERE agent_id = $1 AND deleted_at IS NULL
+		`
+	case "contact":
+		sql = `
+			SELECT COALESCE(
+				json_agg(
+					json_build_object(
+						'contact_id', contact_id,
+						'contact_type', contact_type,
+						'contact_number', contact_number,
+						'is_primary', is_primary,
+						'version', version
+					)
+				),
+				'[]'::json
+			) as result
+			FROM agent_contacts
+			WHERE agent_id = $1 AND deleted_at IS NULL
+		`
+	default:
+		return nil, fmt.Errorf("unsupported section: %s", section)
+	}
+
+	var resultJSON string
+	err := r.db.QueryRow(cCtx, sql, agentID).Scan(&resultJSON)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("agent not found or no data for section: %s", section)
+		}
+		return nil, fmt.Errorf("failed to get update form data: %w", err)
+	}
+
+	// Parse JSON result
+	var result map[string]interface{}
+	err = dbutil.UnmarshalJSON([]byte(resultJSON), &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal form data: %w", err)
+	}
+
+	return result, nil
+}
+
+// UpdateAgentPersonalInfoReturning updates personal information with UPDATE...RETURNING
+// AGT-025: Update Profile Section (personal_info)
+// FR-AGT-PRF-006: Personal Information Update
+// BR-AGT-PRF-005: Name Update with Audit Logging
+// BR-AGT-PRF-006: PAN Update with Format and Uniqueness Validation
+// CRITICAL: Single atomic operation with UPDATE...RETURNING
+func (r *AgentProfileRepository) UpdateAgentPersonalInfoReturning(
+	ctx context.Context,
+	agentID string,
+	updates map[string]interface{},
+	updatedBy string,
+) (*domain.AgentProfile, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	// Build dynamic UPDATE query
+	updateQuery := dblib.Psql.Update(agentProfileTable).
+		Set("updated_at", time.Now()).
+		Set("updated_by", updatedBy).
+		Set("version", sq.Expr("version + 1")).
+		Where(sq.And{
+			sq.Eq{"agent_id": agentID},
+			sq.Eq{"deleted_at": nil},
+		})
+
+	// Add dynamic fields from updates map
+	for field, value := range updates {
+		updateQuery = updateQuery.Set(field, value)
+	}
+
+	// Add RETURNING clause
+	updateQuery = updateQuery.Suffix("RETURNING *")
+
+	var result domain.AgentProfile
+	err := dblib.SelectOne(cCtx, r.db, updateQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &result)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("agent not found: %s", agentID)
+		}
+		return nil, fmt.Errorf("failed to update personal info: %w", err)
+	}
+
+	return &result, nil
+}
