@@ -29,37 +29,31 @@ var FxRepo = fx.Module(
 var FxHandler = fx.Module(
 	"Handlermodule",
 	fx.Provide(
-		// Agent Profile Management Handler
-		fx.Annotate(
-			handler.NewAgentProfileHandler,
-			fx.As(new(serverHandler.Handler)),
-			fx.ResultTags(serverHandler.ServerControllersGroupTag),
-		),
-		// Agent Lookup Handler
+		// PHASE 4: Lookup & Validation APIs (AGT-007 to AGT-021)
+		// Agent Lookup Handler (AGT-007 to AGT-011)
 		fx.Annotate(
 			handler.NewAgentLookupHandler,
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// Agent License Handler
+		// Agent Validation Handler (AGT-012 to AGT-015)
 		fx.Annotate(
-			handler.NewAgentLicenseHandler,
+			handler.NewAgentValidationHandler,
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// Agent Status Handler
+		// Agent Workflow Handler (AGT-016 to AGT-021)
 		fx.Annotate(
-			handler.NewAgentStatusHandler,
+			handler.NewAgentWorkflowHandler,
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// Agent Search Handler
-		fx.Annotate(
-			handler.NewAgentSearchHandler,
-			fx.As(new(serverHandler.Handler)),
-			fx.ResultTags(serverHandler.ServerControllersGroupTag),
-		),
-		// Add more handler constructors here as needed
+		// TODO: PHASE 5 - Add profile creation handlers
+		// TODO: PHASE 6 - Add profile update handlers
+		// TODO: PHASE 7 - Add license management handlers
+		// TODO: PHASE 8 - Add status management handlers
+		// TODO: PHASE 9 - Add search and dashboard handlers
+		// TODO: PHASE 10 - Add batch and webhook handlers
 	),
 )
 
