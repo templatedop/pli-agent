@@ -2,16 +2,19 @@ package handler
 
 import (
 	"fmt"
+	"time"
 
 	"pli-agent-api/core/domain"
 	"pli-agent-api/core/port"
 	req "pli-agent-api/handler/request"
 	resp "pli-agent-api/handler/response"
 	repo "pli-agent-api/repo/postgres"
+	"pli-agent-api/workflows"
 
 	log "gitlab.cept.gov.in/it-2.0-common/n-api-log"
 	serverHandler "gitlab.cept.gov.in/it-2.0-common/n-api-server/handler"
 	serverRoute "gitlab.cept.gov.in/it-2.0-common/n-api-server/route"
+	"go.temporal.io/sdk/client"
 )
 
 // AgentStatusManagementHandler handles agent status management APIs
@@ -24,17 +27,20 @@ type AgentStatusManagementHandler struct {
 	*serverHandler.Base
 	terminationRepo *repo.AgentTerminationRepository
 	profileRepo     *repo.AgentProfileRepository
+	temporalClient  client.Client
 }
 
 // NewAgentStatusManagementHandler creates a new status management handler
 func NewAgentStatusManagementHandler(
 	terminationRepo *repo.AgentTerminationRepository,
 	profileRepo *repo.AgentProfileRepository,
+	temporalClient client.Client,
 ) *AgentStatusManagementHandler {
 	return &AgentStatusManagementHandler{
 		Base:            &serverHandler.Base{},
 		terminationRepo: terminationRepo,
 		profileRepo:     profileRepo,
+		temporalClient:  temporalClient,
 	}
 }
 
@@ -101,13 +107,31 @@ func (h *AgentStatusManagementHandler) TerminateAgent(
 
 	log.Info(sctx.Ctx, "Agent terminated successfully: %s, termination_id: %s", uri.AgentID, terminationRecord.TerminationID)
 
-	// TODO: Initiate Temporal workflow for termination orchestration
-	// - Disable portal access
-	// - Stop commission processing
-	// - Generate termination letter
-	// - Archive agent data (7-year retention)
-	// - Send notifications
-	// This will be implemented when Temporal is set up
+	// Initiate Temporal workflow for termination orchestration
+	// WF-AGT-PRF-004: Agent Termination Workflow
+	// This workflow handles: portal disable, commission stop, letter generation, data archival, notifications
+	workflowOptions := client.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: "agent-profile-task-queue",
+	}
+
+	workflowInput := workflows.TerminationWorkflowInput{
+		AgentID:               uri.AgentID,
+		TerminationReason:     request.TerminationReason,
+		TerminationReasonCode: request.TerminationReasonCode,
+		EffectiveDate:         request.EffectiveDate,
+		TerminatedBy:          request.TerminatedBy,
+		TerminationRecordID:   terminationRecord.TerminationID,
+	}
+
+	_, err = h.temporalClient.ExecuteWorkflow(sctx.Ctx, workflowOptions, workflows.AgentTerminationWorkflow, workflowInput)
+	if err != nil {
+		log.Error(sctx.Ctx, "Failed to start termination workflow: %v", err)
+		// Don't fail the request - the database is already updated
+		// Workflow can be retried manually if needed
+	} else {
+		log.Info(sctx.Ctx, "Termination workflow started: %s", workflowID)
+	}
 
 	return &resp.TerminateAgentResponse{
 		StatusCodeAndMessage: port.AgentTerminationSuccess,
@@ -231,12 +255,31 @@ func (h *AgentStatusManagementHandler) ReinstateAgent(
 	log.Info(sctx.Ctx, "Reinstatement request created successfully: %s, request_id: %s",
 		uri.AgentID, reinstatementRequest.ReinstatementID)
 
-	// TODO: Initiate Temporal workflow for reinstatement approval
-	// - Route to manager for approval
-	// - Send notification to approver
-	// - On approval: restore agent status, enable commission, send confirmation
-	// - On rejection: notify requester with reason
-	// This will be implemented when Temporal is set up
+	// Initiate Temporal workflow for reinstatement approval
+	// WF-AGT-PRF-011: Agent Reinstatement Workflow
+	// This workflow handles: approval routing, notifications, status restoration, portal access, notifications
+	workflowOptions := client.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: "agent-profile-task-queue",
+		// Long timeout for human approval (30 days)
+		WorkflowExecutionTimeout: 30 * 24 * time.Hour,
+	}
+
+	workflowInput := workflows.ReinstatementWorkflowInput{
+		ReinstatementID:     reinstatementRequest.ReinstatementID,
+		AgentID:             uri.AgentID,
+		ReinstatementReason: request.ReinstatementReason,
+		RequestedBy:         request.RequestedBy,
+	}
+
+	_, err = h.temporalClient.ExecuteWorkflow(sctx.Ctx, workflowOptions, workflows.AgentReinstatementWorkflow, workflowInput)
+	if err != nil {
+		log.Error(sctx.Ctx, "Failed to start reinstatement workflow: %v", err)
+		// Don't fail the request - the database is already updated
+		// Workflow can be retried manually if needed
+	} else {
+		log.Info(sctx.Ctx, "Reinstatement workflow started: %s (waiting for approval)", workflowID)
+	}
 
 	return &resp.ReinstateAgentResponse{
 		StatusCodeAndMessage: port.ReinstatementRequestCreated,

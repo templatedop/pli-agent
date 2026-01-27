@@ -111,12 +111,27 @@ var FxTemporal = fx.Module(
 		},
 
 		// Provide activity structs with repository dependencies
+		// Phase 5: Agent Onboarding Activities (WF-002)
 		activities.NewAgentOnboardingActivities,
+
+		// Phase 8: License Deactivation Activities (WF-AGT-PRF-007)
+		activities.NewLicenseDeactivationActivities,
+
+		// Phase 8: Agent Termination Activities (WF-AGT-PRF-004)
+		activities.NewAgentTerminationActivities,
+
+		// Phase 8: Agent Reinstatement Activities (WF-AGT-PRF-011)
+		activities.NewAgentReinstatementActivities,
 	),
 
 	fx.Invoke(
 		// Register workflows and activities with worker
-		func(lc fx.Lifecycle, c client.Client, cfg *config.Config, activities *activities.AgentOnboardingActivities) error {
+		func(lc fx.Lifecycle, c client.Client, cfg *config.Config,
+			onboardingActivities *activities.AgentOnboardingActivities,
+			deactivationActivities *activities.LicenseDeactivationActivities,
+			terminationActivities *activities.AgentTerminationActivities,
+			reinstatementActivities *activities.AgentReinstatementActivities,
+		) error {
 			taskQueue := cfg.GetString("temporal.taskqueue")
 			if taskQueue == "" {
 				taskQueue = "agent-profile-task-queue" // Default task queue
@@ -129,53 +144,111 @@ var FxTemporal = fx.Module(
 				MaxConcurrentActivityTaskPollers:        cfg.GetInt("temporal.worker.max_pollers"),
 			})
 
-			// Register workflows
-			// WF-002: Agent Onboarding Workflow
+			// ========================================
+			// Register All Workflows
+			// ========================================
+
+			// PHASE 5: WF-002 - Agent Onboarding Workflow
 			w.RegisterWorkflow(workflows.AgentOnboardingWorkflow)
 			// Agent Approval Child Workflow (human-in-the-loop pattern)
 			w.RegisterWorkflow(workflows.AgentApprovalWorkflow)
 
-			// Register all activities for WF-002
+			// PHASE 8: WF-AGT-PRF-007 - License Deactivation Workflow (Scheduled)
+			w.RegisterWorkflow(workflows.LicenseDeactivationWorkflow)
+
+			// PHASE 8: WF-AGT-PRF-004 - Agent Termination Workflow
+			w.RegisterWorkflow(workflows.AgentTerminationWorkflow)
+
+			// PHASE 8: WF-AGT-PRF-011 - Agent Reinstatement Workflow
+			w.RegisterWorkflow(workflows.AgentReinstatementWorkflow)
+
+			// ========================================
+			// Register All Activities
+			// ========================================
+
+			// PHASE 5: Agent Onboarding Activities (WF-002)
 			// RecordWorkflowStartActivity (FIRST activity - makes workflow self-recording)
-			w.RegisterActivity(activities.RecordWorkflowStartActivity)
+			w.RegisterActivity(onboardingActivities.RecordWorkflowStartActivity)
 			// ACT-011: ValidateAgentTypeActivity
-			w.RegisterActivity(activities.ValidateAgentTypeActivity)
+			w.RegisterActivity(onboardingActivities.ValidateAgentTypeActivity)
 			// ACT-012: ValidateProfileDataActivity
-			w.RegisterActivity(activities.ValidateProfileDataActivity)
+			w.RegisterActivity(onboardingActivities.ValidateProfileDataActivity)
 			// ACT-013: ValidateEmployeeIDActivity
-			w.RegisterActivity(activities.ValidateEmployeeIDActivity)
+			w.RegisterActivity(onboardingActivities.ValidateEmployeeIDActivity)
 			// ACT-014: FetchHRMSDataActivity
-			w.RegisterActivity(activities.FetchHRMSDataActivity)
+			w.RegisterActivity(onboardingActivities.FetchHRMSDataActivity)
 			// ACT-015: AutoPopulateProfileActivity
-			w.RegisterActivity(activities.AutoPopulateProfileActivity)
+			w.RegisterActivity(onboardingActivities.AutoPopulateProfileActivity)
 			// ACT-016: ValidateAdvisorCoordinatorActivity
-			w.RegisterActivity(activities.ValidateAdvisorCoordinatorActivity)
+			w.RegisterActivity(onboardingActivities.ValidateAdvisorCoordinatorActivity)
 			// ACT-017: ValidatePANUniquenessActivity
-			w.RegisterActivity(activities.ValidatePANUniquenessActivity)
+			w.RegisterActivity(onboardingActivities.ValidatePANUniquenessActivity)
 			// ACT-018: ValidateMandatoryFieldsActivity
-			w.RegisterActivity(activities.ValidateMandatoryFieldsActivity)
+			w.RegisterActivity(onboardingActivities.ValidateMandatoryFieldsActivity)
 			// ACT-019: UploadKYCDocumentsActivity
-			w.RegisterActivity(activities.UploadKYCDocumentsActivity)
+			w.RegisterActivity(onboardingActivities.UploadKYCDocumentsActivity)
 			// ACT-020: ValidateDocumentsActivity
-			w.RegisterActivity(activities.ValidateDocumentsActivity)
+			w.RegisterActivity(onboardingActivities.ValidateDocumentsActivity)
 			// ACT-021: CheckApprovalRequiredActivity
-			w.RegisterActivity(activities.CheckApprovalRequiredActivity)
+			w.RegisterActivity(onboardingActivities.CheckApprovalRequiredActivity)
 			// ACT-022: SendApprovalRequestActivity
-			w.RegisterActivity(activities.SendApprovalRequestActivity)
+			w.RegisterActivity(onboardingActivities.SendApprovalRequestActivity)
 			// ACT-023: GenerateAgentCodeActivity
-			w.RegisterActivity(activities.GenerateAgentCodeActivity)
+			w.RegisterActivity(onboardingActivities.GenerateAgentCodeActivity)
 			// ACT-024: CreateAgentProfileActivity
-			w.RegisterActivity(activities.CreateAgentProfileActivity)
+			w.RegisterActivity(onboardingActivities.CreateAgentProfileActivity)
 			// ACT-025: LinkToHierarchyActivity
-			w.RegisterActivity(activities.LinkToHierarchyActivity)
+			w.RegisterActivity(onboardingActivities.LinkToHierarchyActivity)
 			// ACT-026: CreateLicenseRecordActivity
-			w.RegisterActivity(activities.CreateLicenseRecordActivity)
+			w.RegisterActivity(onboardingActivities.CreateLicenseRecordActivity)
 			// ACT-027: SendWelcomeEmailActivity
-			w.RegisterActivity(activities.SendWelcomeEmailActivity)
+			w.RegisterActivity(onboardingActivities.SendWelcomeEmailActivity)
 			// ACT-028: SendWelcomeSMSActivity
-			w.RegisterActivity(activities.SendWelcomeSMSActivity)
+			w.RegisterActivity(onboardingActivities.SendWelcomeSMSActivity)
 			// SendApprovalNotificationActivity (used by approval child workflow)
-			w.RegisterActivity(activities.SendApprovalNotificationActivity)
+			w.RegisterActivity(onboardingActivities.SendApprovalNotificationActivity)
+
+			// PHASE 8: License Deactivation Activities (WF-AGT-PRF-007)
+			// ACT-DEC-001: Find Expired Licenses
+			w.RegisterActivity(deactivationActivities.FindExpiredLicensesActivity)
+			// ACT-DEC-002: Batch Update Agent Status
+			w.RegisterActivity(deactivationActivities.BatchUpdateAgentStatusActivity)
+			// ACT-DEC-003: Batch Disable Portal Access
+			w.RegisterActivity(deactivationActivities.BatchDisablePortalAccessActivity)
+			// ACT-DEC-004: Batch Stop Commission
+			w.RegisterActivity(deactivationActivities.BatchStopCommissionActivity)
+			// ACT-DEC-005: Batch Send Notification
+			w.RegisterActivity(deactivationActivities.BatchSendNotificationActivity)
+			// ACT-DEC-006: Create Batch Audit Log
+			w.RegisterActivity(deactivationActivities.CreateBatchAuditLogActivity)
+
+			// PHASE 8: Agent Termination Activities (WF-AGT-PRF-004)
+			// ACT-TERM-001: Disable Portal Access
+			w.RegisterActivity(terminationActivities.DisablePortalAccessActivity)
+			// ACT-TERM-002: Stop Commission Processing
+			w.RegisterActivity(terminationActivities.StopCommissionProcessingActivity)
+			// ACT-TERM-003: Generate Termination Letter
+			w.RegisterActivity(terminationActivities.GenerateTerminationLetterActivity)
+			// ACT-TERM-004: Archive Agent Data
+			w.RegisterActivity(terminationActivities.ArchiveAgentDataActivity)
+			// ACT-TERM-005: Send Termination Notifications
+			w.RegisterActivity(terminationActivities.SendTerminationNotificationsActivity)
+			// ACT-TERM-006: Update Termination Record
+			w.RegisterActivity(terminationActivities.UpdateTerminationRecordActivity)
+
+			// PHASE 8: Agent Reinstatement Activities (WF-AGT-PRF-011)
+			// ACT-REINST-001: Send Approval Request Notification
+			w.RegisterActivity(reinstatementActivities.SendApprovalRequestNotificationActivity)
+			// ACT-REINST-002: Approve Reinstatement
+			w.RegisterActivity(reinstatementActivities.ApproveReinstatementActivity)
+			// ACT-REINST-003: Reject Reinstatement
+			w.RegisterActivity(reinstatementActivities.RejectReinstatementActivity)
+			// ACT-REINST-004: Restore Portal Access
+			w.RegisterActivity(reinstatementActivities.RestorePortalAccessActivity)
+			// ACT-REINST-005: Send Approval Confirmation Notification
+			w.RegisterActivity(reinstatementActivities.SendReinstatementApprovalNotificationActivity)
+			// ACT-REINST-006: Send Rejection Notification
+			w.RegisterActivity(reinstatementActivities.SendReinstatementRejectionNotificationActivity)
 
 			// Start worker in lifecycle
 			lc.Append(fx.Hook{
