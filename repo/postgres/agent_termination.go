@@ -40,7 +40,8 @@ func NewAgentTerminationRepository(db *dblib.DB, cfg *config.Config) *AgentTermi
 // VR-AGT-PRF-020: Termination Reason Mandatory (min 20 chars)
 // VR-AGT-PRF-021: Termination Date Future or Today
 // WF-AGT-PRF-004: Termination Workflow
-// CRITICAL: Single database round trip with CTE for INSERT termination + INSERT audit
+// FR-AGT-PRF-022: Audit History Tracking
+// CRITICAL: Single database round trip with batch for INSERT termination + INSERT audit
 func (r *AgentTerminationRepository) Create(ctx context.Context, termination domain.AgentTermination) (*domain.AgentTermination, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
@@ -57,9 +58,10 @@ func (r *AgentTerminationRepository) Create(ctx context.Context, termination dom
 		return nil, fmt.Errorf("termination effective date cannot be in the past")
 	}
 
-	// Use CTE to combine INSERT termination + INSERT audit log in single round trip
-	// BR-AGT-PRF-017: Agent Termination Workflow
-	// FR-AGT-PRF-022: Audit History Tracking
+	// Use batch to combine INSERT termination + INSERT audit log in single round trip
+	batch := &pgx.Batch{}
+
+	// Query 1: Insert termination record
 	insertQuery := dblib.Psql.Insert(agentTerminationTable).
 		Columns(
 			"agent_id", "termination_reason_code", "termination_reason_text",
@@ -77,17 +79,16 @@ func (r *AgentTerminationRepository) Create(ctx context.Context, termination dom
 		Suffix("RETURNING *")
 
 	var result domain.AgentTermination
-	err := dblib.SelectOne(cCtx, r.db, insertQuery, pgx.RowToStructByNameLax[domain.AgentTermination], &result)
+	err := dblib.QueueReturnRow(batch, insertQuery, pgx.RowToStructByNameLax[domain.AgentTermination], &result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create termination record: %w", err)
+		return nil, fmt.Errorf("failed to queue termination insert: %w", err)
 	}
 
-	// Create audit log in separate call (will be combined in CTE in production)
-	// TODO: Combine with CTE pattern
+	// Query 2: Insert audit log
 	auditQuery := dblib.Psql.Insert("agent_audit_logs").
 		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
 		Values(
-			result.AgentID,
+			termination.AgentID,
 			"AGENT_TERMINATED",
 			"agent_status",
 			"TERMINATED",
@@ -96,10 +97,15 @@ func (r *AgentTerminationRepository) Create(ctx context.Context, termination dom
 			time.Now(),
 		)
 
-	_, err = dblib.Insert(cCtx, r.db, auditQuery)
+	err = dblib.QueueExecRow(batch, auditQuery)
 	if err != nil {
-		// Log error but don't fail the operation
-		fmt.Printf("Warning: Failed to create audit log: %v\n", err)
+		return nil, fmt.Errorf("failed to queue audit log: %w", err)
+	}
+
+	// Execute batch
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create termination record: %w", err)
 	}
 
 	return &result, nil
@@ -177,7 +183,8 @@ func (r *AgentTerminationRepository) UpdateWorkflowStatus(
 // UpdateTerminationDetails updates termination details after workflow completion
 // WF-AGT-PRF-004: Termination Workflow
 // BR-AGT-PRF-017: Agent Termination Workflow
-// CRITICAL: UPDATE with RETURNING for atomic operation with audit logging
+// FR-AGT-PRF-022: Audit History Tracking
+// CRITICAL: Single database round trip with CTE for UPDATE + INSERT audit
 func (r *AgentTerminationRepository) UpdateTerminationDetails(
 	ctx context.Context,
 	terminationID string,
@@ -189,40 +196,45 @@ func (r *AgentTerminationRepository) UpdateTerminationDetails(
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	updateQuery := dblib.Psql.Update(agentTerminationTable).
-		Set("termination_letter_url", letterURL).
-		Set("portal_disabled_at", portalDisabledAt).
-		Set("commission_stopped_at", commissionStoppedAt).
-		Set("archive_id", archiveID).
-		Set("workflow_status", domain.WorkflowStatusCompleted).
-		Set("updated_by", updatedBy).
-		Set("updated_at", time.Now()).
-		Where(sq.Eq{"termination_id": terminationID, "deleted_at": nil}).
-		Suffix("RETURNING *")
+	// Use CTE to combine UPDATE + INSERT audit log in single round trip
+	sql := `
+		WITH updated AS (
+			UPDATE agent_termination_records
+			SET
+				termination_letter_url = $2,
+				portal_disabled_at = $3,
+				commission_stopped_at = $4,
+				archive_id = $5,
+				workflow_status = 'COMPLETED',
+				updated_by = $6,
+				updated_at = NOW()
+			WHERE termination_id = $1 AND deleted_at IS NULL
+			RETURNING *
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT
+			agent_id,
+			'TERMINATION_COMPLETED',
+			'workflow_status',
+			'COMPLETED',
+			'Termination workflow completed successfully',
+			$6,
+			NOW()
+		FROM updated
+		RETURNING (SELECT ROW(termination_id, agent_id, termination_reason_code, termination_reason_text, effective_date,
+			termination_letter_url, portal_disabled_at, commission_stopped_at, archive_id, workflow_id, workflow_status,
+			created_by, created_at, updated_by, updated_at, deleted_at, version) FROM updated)
+	`
 
 	var result domain.AgentTermination
-	err := dblib.SelectOne(cCtx, r.db, updateQuery, pgx.RowToStructByNameLax[domain.AgentTermination], &result)
+	err := r.db.QueryRow(cCtx, sql, terminationID, letterURL, portalDisabledAt, commissionStoppedAt, archiveID, updatedBy).Scan(
+		&result.TerminationID, &result.AgentID, &result.TerminationReasonCode, &result.TerminationReasonText,
+		&result.EffectiveDate, &result.TerminationLetterURL, &result.PortalDisabledAt, &result.CommissionStoppedAt,
+		&result.ArchiveID, &result.WorkflowID, &result.WorkflowStatus, &result.CreatedBy, &result.CreatedAt,
+		&result.UpdatedBy, &result.UpdatedAt, &result.DeletedAt, &result.Version,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update termination details: %w", err)
-	}
-
-	// Create audit log
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(
-			result.AgentID,
-			"TERMINATION_COMPLETED",
-			"workflow_status",
-			domain.WorkflowStatusCompleted,
-			"Termination workflow completed successfully",
-			updatedBy,
-			time.Now(),
-		)
-
-	_, err = dblib.Insert(cCtx, r.db, auditQuery)
-	if err != nil {
-		// Log error but don't fail the operation
-		fmt.Printf("Warning: Failed to create audit log: %v\n", err)
 	}
 
 	return &result, nil

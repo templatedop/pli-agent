@@ -36,7 +36,8 @@ func NewAgentDocumentRepository(db *dblib.DB, cfg *config.Config) *AgentDocument
 // AGT-063: Upload Reinstatement Documents
 // FR-AGT-PRF-013: Reinstatement Process
 // BR-AGT-PRF-016: Status updates require mandatory reason
-// CRITICAL: Single database round trip with INSERT document + INSERT audit
+// FR-AGT-PRF-022: Audit History Tracking
+// CRITICAL: Single database round trip with batch (INSERT document + INSERT audit)
 func (r *AgentDocumentRepository) Create(ctx context.Context, document domain.AgentDocument) (*domain.AgentDocument, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
@@ -51,7 +52,10 @@ func (r *AgentDocumentRepository) Create(ctx context.Context, document domain.Ag
 		return nil, fmt.Errorf("invalid file type: %s (allowed: PDF, JPG, PNG)", document.MimeType)
 	}
 
-	// Insert document record
+	// Use batch to combine INSERT document + INSERT audit log in single round trip
+	batch := &pgx.Batch{}
+
+	// Query 1: Insert document record
 	insertQuery := dblib.Psql.Insert(agentDocumentTable).
 		Columns(
 			"agent_id", "reference_type", "reference_id", "document_type",
@@ -71,17 +75,16 @@ func (r *AgentDocumentRepository) Create(ctx context.Context, document domain.Ag
 		Suffix("RETURNING *")
 
 	var result domain.AgentDocument
-	err := dblib.SelectOne(cCtx, r.db, insertQuery, pgx.RowToStructByNameLax[domain.AgentDocument], &result)
+	err := dblib.QueueReturnRow(batch, insertQuery, pgx.RowToStructByNameLax[domain.AgentDocument], &result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create document record: %w", err)
+		return nil, fmt.Errorf("failed to queue document insert: %w", err)
 	}
 
-	// Create audit log
-	// FR-AGT-PRF-022: Audit History Tracking
+	// Query 2: Insert audit log
 	auditQuery := dblib.Psql.Insert("agent_audit_logs").
 		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
 		Values(
-			result.AgentID,
+			document.AgentID,
 			"DOCUMENT_UPLOADED",
 			"document_type",
 			document.DocumentType,
@@ -90,10 +93,15 @@ func (r *AgentDocumentRepository) Create(ctx context.Context, document domain.Ag
 			time.Now(),
 		)
 
-	_, err = dblib.Insert(cCtx, r.db, auditQuery)
+	err = dblib.QueueExecRow(batch, auditQuery)
 	if err != nil {
-		// Log error but don't fail the operation
-		fmt.Printf("Warning: Failed to create audit log: %v\n", err)
+		return nil, fmt.Errorf("failed to queue audit log: %w", err)
+	}
+
+	// Execute batch
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create document record: %w", err)
 	}
 
 	return &result, nil
@@ -170,46 +178,39 @@ func (r *AgentDocumentRepository) FindByAgentID(ctx context.Context, agentID str
 // Delete soft deletes a document
 // FR-AGT-PRF-013: Reinstatement Process
 // FR-AGT-PRF-022: Audit History Tracking
+// CRITICAL: Single database round trip with CTE (UPDATE + INSERT audit)
 func (r *AgentDocumentRepository) Delete(ctx context.Context, documentID, deletedBy string) error {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Get document for audit log
-	document, err := r.FindByID(ctx, documentID)
-	if err != nil {
-		return err
-	}
+	// Use CTE to combine UPDATE + INSERT audit log in single round trip
+	// WITH deleted AS (UPDATE... RETURNING ...) INSERT INTO audit_logs SELECT ... FROM deleted
+	sql := `
+		WITH deleted AS (
+			UPDATE agent_documents
+			SET deleted_at = NOW()
+			WHERE document_id = $1 AND deleted_at IS NULL
+			RETURNING agent_id, file_name
+		)
+		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+		SELECT
+			agent_id,
+			'DOCUMENT_DELETED',
+			'document_id',
+			$1,
+			'Document deleted: ' || file_name,
+			$2,
+			NOW()
+		FROM deleted
+	`
 
-	updateQuery := dblib.Psql.Update(agentDocumentTable).
-		Set("deleted_at", time.Now()).
-		Where(sq.Eq{"document_id": documentID, "deleted_at": nil})
-
-	tag, err := dblib.Update(cCtx, r.db, updateQuery)
+	tag, err := r.db.Exec(cCtx, sql, documentID, deletedBy)
 	if err != nil {
 		return fmt.Errorf("failed to delete document: %w", err)
 	}
 
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("document not found: %s", documentID)
-	}
-
-	// Create audit log
-	auditQuery := dblib.Psql.Insert("agent_audit_logs").
-		Columns("agent_id", "action_type", "field_name", "new_value", "action_reason", "performed_by", "performed_at").
-		Values(
-			document.AgentID,
-			"DOCUMENT_DELETED",
-			"document_id",
-			documentID,
-			fmt.Sprintf("Document deleted: %s", document.FileName),
-			deletedBy,
-			time.Now(),
-		)
-
-	_, err = dblib.Insert(cCtx, r.db, auditQuery)
-	if err != nil {
-		// Log error but don't fail the operation
-		fmt.Printf("Warning: Failed to create audit log: %v\n", err)
 	}
 
 	return nil
