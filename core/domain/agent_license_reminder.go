@@ -16,8 +16,8 @@ type AgentLicenseReminder struct {
 	LicenseID string `json:"license_id" db:"license_id"`
 
 	// Reminder Details (BR-AGT-PRF-014)
-	ReminderType string     `json:"reminder_type" db:"reminder_type"` // 30_DAYS, 15_DAYS, 7_DAYS, EXPIRY_DAY
-	ReminderDate time.Time  `json:"reminder_date" db:"reminder_date"`
+	ReminderType string       `json:"reminder_type" db:"reminder_type"` // 30_DAYS, 15_DAYS, 7_DAYS, EXPIRY_DAY
+	ReminderDate time.Time    `json:"reminder_date" db:"reminder_date"`
 	SentDate     sql.NullTime `json:"sent_date" db:"sent_date"`
 
 	// Sent Status
@@ -41,9 +41,9 @@ type AgentLicenseReminder struct {
 
 // ReminderType constants (BR-AGT-PRF-014)
 const (
-	ReminderType30Days   = "30_DAYS"
-	ReminderType15Days   = "15_DAYS"
-	ReminderType7Days    = "7_DAYS"
+	ReminderType30Days    = "30_DAYS"
+	ReminderType15Days    = "15_DAYS"
+	ReminderType7Days     = "7_DAYS"
 	ReminderTypeExpiryDay = "EXPIRY_DAY"
 )
 

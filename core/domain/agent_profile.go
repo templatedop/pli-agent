@@ -18,19 +18,19 @@ type AgentProfile struct {
 	EmployeeID sql.NullString `json:"employee_id" db:"employee_id"`
 
 	// Office and Hierarchy (BR-AGT-PRF-002)
-	OfficeCode            string         `json:"office_code" db:"office_code"`
-	CircleID              sql.NullString `json:"circle_id" db:"circle_id"`
-	DivisionID            sql.NullString `json:"division_id" db:"division_id"`
-	AdvisorCoordinatorID  sql.NullString `json:"advisor_coordinator_id" db:"advisor_coordinator_id"`
+	OfficeCode           string         `json:"office_code" db:"office_code"`
+	CircleID             sql.NullString `json:"circle_id" db:"circle_id"`
+	DivisionID           sql.NullString `json:"division_id" db:"division_id"`
+	AdvisorCoordinatorID sql.NullString `json:"advisor_coordinator_id" db:"advisor_coordinator_id"`
 
 	// Personal Information (VR-AGT-PRF-001 to VR-AGT-PRF-007)
-	Title        sql.NullString `json:"title" db:"title"`
-	FirstName    string         `json:"first_name" db:"first_name"`
-	MiddleName   sql.NullString `json:"middle_name" db:"middle_name"`
-	LastName     string         `json:"last_name" db:"last_name"`
-	Gender       string         `json:"gender" db:"gender"`
-	DateOfBirth  time.Time      `json:"date_of_birth" db:"date_of_birth"`
-	Category     sql.NullString `json:"category" db:"category"`
+	Title         sql.NullString `json:"title" db:"title"`
+	FirstName     string         `json:"first_name" db:"first_name"`
+	MiddleName    sql.NullString `json:"middle_name" db:"middle_name"`
+	LastName      string         `json:"last_name" db:"last_name"`
+	Gender        string         `json:"gender" db:"gender"`
+	DateOfBirth   time.Time      `json:"date_of_birth" db:"date_of_birth"`
+	Category      sql.NullString `json:"category" db:"category"`
 	MaritalStatus sql.NullString `json:"marital_status" db:"marital_status"`
 
 	// Identification Numbers (VR-AGT-PRF-003, VR-AGT-PRF-004)
@@ -43,14 +43,14 @@ type AgentProfile struct {
 	ProfessionalTitle sql.NullString `json:"professional_title" db:"professional_title"`
 
 	// Status Management (BR-AGT-PRF-016, BR-AGT-PRF-017)
-	Status       string         `json:"status" db:"status"`               // BR-AGT-PRF-016
+	Status       string         `json:"status" db:"status"` // BR-AGT-PRF-016
 	StatusDate   time.Time      `json:"status_date" db:"status_date"`
 	StatusReason sql.NullString `json:"status_reason" db:"status_reason"` // BR-AGT-PRF-016: Mandatory for SUSPENDED/TERMINATED/DEACTIVATED
 
 	// Distribution Channel and Product Authorization (BR-AGT-PRF-026)
-	DistributionChannel           sql.NullString `json:"distribution_channel" db:"distribution_channel"`
-	ProductClass                  sql.NullString `json:"product_class" db:"product_class"` // BR-AGT-PRF-026
-	ExternalIdentificationNumber  sql.NullString `json:"external_identification_number" db:"external_identification_number"` // BR-AGT-PRF-027
+	DistributionChannel          sql.NullString `json:"distribution_channel" db:"distribution_channel"`
+	ProductClass                 sql.NullString `json:"product_class" db:"product_class"`                                   // BR-AGT-PRF-026
+	ExternalIdentificationNumber sql.NullString `json:"external_identification_number" db:"external_identification_number"` // BR-AGT-PRF-027
 
 	// Goals and Performance (BR-AGT-PRF-024)
 	Goals sql.NullString `json:"goals" db:"goals"` // JSONB stored as string

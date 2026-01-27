@@ -16,14 +16,14 @@ type AgentLicense struct {
 	AgentID string `json:"agent_id" db:"agent_id"`
 
 	// License Details (BR-AGT-PRF-012, VR-AGT-PRF-013, VR-AGT-PRF-014)
-	LicenseLine     string `json:"license_line" db:"license_line"`         // LIFE
-	LicenseType     string `json:"license_type" db:"license_type"`         // PROVISIONAL, PERMANENT
-	LicenseNumber   string `json:"license_number" db:"license_number"`     // VR-AGT-PRF-013: Unique
-	ResidentStatus  string `json:"resident_status" db:"resident_status"`   // RESIDENT, NON_RESIDENT
+	LicenseLine    string `json:"license_line" db:"license_line"`       // LIFE
+	LicenseType    string `json:"license_type" db:"license_type"`       // PROVISIONAL, PERMANENT
+	LicenseNumber  string `json:"license_number" db:"license_number"`   // VR-AGT-PRF-013: Unique
+	ResidentStatus string `json:"resident_status" db:"resident_status"` // RESIDENT, NON_RESIDENT
 
 	// License Dates (BR-AGT-PRF-030)
 	LicenseDate   time.Time `json:"license_date" db:"license_date"`
-	RenewalDate   time.Time `json:"renewal_date" db:"renewal_date"`     // BR-AGT-PRF-012, BR-AGT-PRF-014
+	RenewalDate   time.Time `json:"renewal_date" db:"renewal_date"` // BR-AGT-PRF-012, BR-AGT-PRF-014
 	AuthorityDate time.Time `json:"authority_date" db:"authority_date"`
 
 	// Renewal Tracking (BR-AGT-PRF-012)
@@ -31,8 +31,8 @@ type AgentLicense struct {
 	LicenseStatus string `json:"license_status" db:"license_status"` // ACTIVE, EXPIRED, RENEWED
 
 	// License Exam Status (BR-AGT-PRF-012)
-	LicentiateExamPassed        bool          `json:"licentiate_exam_passed" db:"licentiate_exam_passed"`
-	LicentiateExamDate          sql.NullTime  `json:"licentiate_exam_date" db:"licentiate_exam_date"`
+	LicentiateExamPassed        bool           `json:"licentiate_exam_passed" db:"licentiate_exam_passed"`
+	LicentiateExamDate          sql.NullTime   `json:"licentiate_exam_date" db:"licentiate_exam_date"`
 	LicentiateCertificateNumber sql.NullString `json:"licentiate_certificate_number" db:"licentiate_certificate_number"`
 
 	// Primary License Flag

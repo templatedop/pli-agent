@@ -21,8 +21,8 @@ type AgentProfileSession struct {
 	ProgressPercentage int    `json:"progress_percentage" db:"progress_percentage"`
 
 	// Session Data
-	FormData         sql.NullString `json:"form_data" db:"form_data"`                   // JSONB
-	ValidationErrors sql.NullString `json:"validation_errors" db:"validation_errors"`   // JSONB
+	FormData         sql.NullString `json:"form_data" db:"form_data"`                 // JSONB
+	ValidationErrors sql.NullString `json:"validation_errors" db:"validation_errors"` // JSONB
 
 	// Temporal Integration
 	TemporalWorkflowID sql.NullString `json:"temporal_workflow_id" db:"temporal_workflow_id"`
@@ -32,14 +32,14 @@ type AgentProfileSession struct {
 	Status string `json:"status" db:"status"` // ACTIVE, EXPIRED, COMPLETED, CANCELLED
 
 	// Timestamps
-	CreatedAt   time.Time      `json:"created_at" db:"created_at"`
-	UpdatedAt   sql.NullTime   `json:"updated_at" db:"updated_at"`
-	ExpiresAt   time.Time      `json:"expires_at" db:"expires_at"`
-	CompletedAt sql.NullTime   `json:"completed_at" db:"completed_at"`
+	CreatedAt   time.Time    `json:"created_at" db:"created_at"`
+	UpdatedAt   sql.NullTime `json:"updated_at" db:"updated_at"`
+	ExpiresAt   time.Time    `json:"expires_at" db:"expires_at"`
+	CompletedAt sql.NullTime `json:"completed_at" db:"completed_at"`
 
 	// User Tracking
-	InitiatedBy     string         `json:"initiated_by" db:"initiated_by"`
-	LastUpdatedBy   sql.NullString `json:"last_updated_by" db:"last_updated_by"`
+	InitiatedBy   string         `json:"initiated_by" db:"initiated_by"`
+	LastUpdatedBy sql.NullString `json:"last_updated_by" db:"last_updated_by"`
 
 	// Metadata
 	Metadata sql.NullString `json:"metadata" db:"metadata"` // JSONB

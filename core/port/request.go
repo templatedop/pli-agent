@@ -15,8 +15,8 @@ type MetadataRequest struct {
 // FilterRequest provides common filtering parameters for agent searches
 // FR-AGT-PRF-021: Multi-Criteria Agent Search
 type FilterRequest struct {
-	Status    string `form:"status" validate:"omitempty"`
-	AgentType string `form:"agent_type" validate:"omitempty"`
-	CircleID  string `form:"circle_id" validate:"omitempty"`
+	Status     string `form:"status" validate:"omitempty"`
+	AgentType  string `form:"agent_type" validate:"omitempty"`
+	CircleID   string `form:"circle_id" validate:"omitempty"`
 	DivisionID string `form:"division_id" validate:"omitempty"`
 }

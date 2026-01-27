@@ -41,7 +41,7 @@ type AgentContact struct {
 
 // ContactType constants (VR-AGT-PRF-011)
 const (
-	ContactTypeMobile            = "MOBILE"
-	ContactTypeOfficialLandline  = "OFFICIAL_LANDLINE"
-	ContactTypeResidentLandline  = "RESIDENT_LANDLINE"
+	ContactTypeMobile           = "MOBILE"
+	ContactTypeOfficialLandline = "OFFICIAL_LANDLINE"
+	ContactTypeResidentLandline = "RESIDENT_LANDLINE"
 )

@@ -67,9 +67,9 @@ type VerificationStatus struct {
 
 // SLATracking represents SLA tracking information
 type SLATracking struct {
-	SLAStatus           string         `json:"sla_status"` // GREEN, YELLOW, RED
-	TimeElapsedMinutes  int            `json:"time_elapsed_minutes"`
-	NextActionsDue      []NextActionDue `json:"next_actions_due"`
+	SLAStatus          string          `json:"sla_status"` // GREEN, YELLOW, RED
+	TimeElapsedMinutes int             `json:"time_elapsed_minutes"`
+	NextActionsDue     []NextActionDue `json:"next_actions_due"`
 }
 
 // NextActionDue represents a due action

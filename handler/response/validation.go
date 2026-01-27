@@ -28,16 +28,16 @@ type PANUniquenessResponse struct {
 
 // EmployeeData represents employee data from HRMS
 type EmployeeData struct {
-	EmployeeID    string `json:"employee_id"`
-	FirstName     string `json:"first_name"`
-	LastName      string `json:"last_name"`
-	DateOfBirth   string `json:"date_of_birth"`
-	Gender        string `json:"gender"`
-	Designation   string `json:"designation"`
-	OfficeCode    string `json:"office_code"`
-	MobileNumber  string `json:"mobile_number"`
-	Email         string `json:"email"`
-	Status        string `json:"status"`
+	EmployeeID   string `json:"employee_id"`
+	FirstName    string `json:"first_name"`
+	LastName     string `json:"last_name"`
+	DateOfBirth  string `json:"date_of_birth"`
+	Gender       string `json:"gender"`
+	Designation  string `json:"designation"`
+	OfficeCode   string `json:"office_code"`
+	MobileNumber string `json:"mobile_number"`
+	Email        string `json:"email"`
+	Status       string `json:"status"`
 }
 
 // EmployeeIDValidationResponse returns employee ID validation result
