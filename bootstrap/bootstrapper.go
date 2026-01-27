@@ -30,6 +30,7 @@ var FxRepo = fx.Module(
 		repo.NewAgentProfileSessionRepository,       // Phase 5: Session management
 		repo.NewAgentProfileUpdateRequestRepository, // Phase 6.1: Approval workflow
 		repo.NewAgentProfileFieldMetadataRepository, // Phase 6.2: Dynamic field metadata
+		repo.NewAgentTerminationRepository,          // Phase 8: Status management
 		// Add more repository constructors here as needed
 	),
 )
@@ -79,7 +80,13 @@ var FxHandler = fx.Module(
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// TODO: PHASE 8 - Add status management handlers
+		// PHASE 8: Status Management APIs (AGT-039 to AGT-041)
+		// Agent Status Management Handler with termination and reinstatement workflows
+		fx.Annotate(
+			handler.NewAgentStatusManagementHandler,
+			fx.As(new(serverHandler.Handler)),
+			fx.ResultTags(serverHandler.ServerControllersGroupTag),
+		),
 		// TODO: PHASE 9 - Add search and dashboard handlers
 		// TODO: PHASE 10 - Add batch and webhook handlers
 	),

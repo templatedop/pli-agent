@@ -40,6 +40,13 @@ var (
 	LicenseExpiringListSuccess    StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "expiring licenses retrieved successfully", Success: true}
 	LicenseReminderSuccess        StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license reminders retrieved successfully", Success: true}
 	LicenseBatchDeactivateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "batch deactivation completed successfully", Success: true}
+
+	// Status Management (Phase 8: AGT-039 to AGT-041)
+	AgentTerminationSuccess      StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "agent termination initiated successfully", Success: true}
+	TerminationLetterRetrieved   StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "termination letter retrieved successfully", Success: true}
+	ReinstatementRequestCreated  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "reinstatement request created successfully", Success: true}
+	ReinstatementApprovalSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "reinstatement approved successfully", Success: true}
+	ReinstatementRejectionSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "reinstatement rejected successfully", Success: true}
 )
 
 // StatusCodeAndMessage is embedded in all response structs
