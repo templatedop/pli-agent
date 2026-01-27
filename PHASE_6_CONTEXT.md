@@ -1,575 +1,372 @@
-# Phase 6 Context - Critical Lessons & Patterns
+# PLI Agent API - Phase 6 Implementation Context
 
-**Date**: 2026-01-26
-**Branch**: claude/develop-policy-apis-golang-BcDD3
-**Current Commit**: 25482e4
-**Status**: Starting Phase 6 - Profile Update APIs (AGT-022 to AGT-028)
-
----
-
-## 🎓 CRITICAL LESSONS LEARNED (MANDATORY FOR ALL PHASES)
-
-### **#1: PRIMARY CONCERN - REDUCE DATABASE ROUND TRIPS**
-
-**ALWAYS aim for single database round trip per operation**
-
-✅ **Pattern**: Use `UPDATE...RETURNING` to eliminate extra SELECT
-```go
-// ❌ BAD (2 trips)
-err = repo.Update(ctx, id, data)
-result, err = repo.FindByID(ctx, id)
-
-// ✅ GOOD (1 trip)
-result, err = repo.UpdateReturning(ctx, id, data)
-```
-
-✅ **Pattern**: Combine operations with CTE
-```sql
--- Single query does: INSERT profile + INSERT audit
-WITH inserted AS (
-  INSERT INTO profiles (...) VALUES (...) RETURNING *
-)
-INSERT INTO audit_logs (...)
-SELECT ... FROM inserted
-```
-
-✅ **Pattern**: Use UNNEST for bulk operations
-```sql
--- Single query inserts N addresses
-INSERT INTO addresses (agent_id, line1, city)
-SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[])
-```
-
-### **#2: ATOMICITY IS MANDATORY**
-
-**Either ALL operations succeed or NONE - no partial states**
-
-✅ **Pattern**: Atomic batch methods in repositories
-```go
-// All entities created in single transaction
-func (r *Repo) CreateWithRelatedEntities(input CreateInput) error {
-    // Uses CTE with UNNEST
-    // Either profile + addresses + contacts ALL created
-    // Or NONE created
-}
-```
-
-✅ **Pattern**: Prevent inconsistent states
-```go
-// ❌ BAD - Can leave inconsistent state
-profileRepo.Create()  // Succeeds
-addressRepo.Create()  // Fails ← Profile exists but no address!
-
-// ✅ GOOD - Atomic
-profileRepo.CreateWithRelatedEntities({
-    Profile: profile,
-    Addresses: addresses,
-    Contacts: contacts,
-}) // All or nothing
-```
-
-### **#3: TEMPORAL WORKFLOW PATTERNS**
-
-✅ **Handler**: Just start workflow
-```go
-we, err := h.temporalClient.ExecuteWorkflow(...)
-// NO database updates here!
-return response
-```
-
-✅ **Workflow**: Orchestrate activities
-```go
-// FIRST activity: Record workflow start
-workflow.ExecuteActivity(ctx, RecordWorkflowStartActivity, ...)
-// Then other activities
-```
-
-✅ **Activity**: Do actual work (including DB updates)
-```go
-// Database updates happen in activities
-// Temporal retries if activity fails
-// Workflow doesn't proceed until activity succeeds
-```
-
-✅ **Self-Recording Pattern**: Workflow records itself
-```go
-// Step 0 in workflow (FIRST activity)
-RecordWorkflowStartActivity {
-    // Updates database with workflow ID/run ID
-    // If fails, Temporal retries
-    // Workflow pauses until database knows about it
-}
-```
-
-### **#4: BULK OPERATIONS**
-
-✅ **Never loop through inserts**
-```go
-// ❌ BAD
-for _, addr := range addresses {
-    addressRepo.Create(addr) // N round trips
-}
-
-// ✅ GOOD
-addressRepo.BulkCreate(addresses) // 1 round trip using UNNEST
-```
-
-### **#5: HUMAN-IN-THE-LOOP APPROVALS**
-
-✅ **Use child workflows**
-```go
-// Start child workflow for approval
-workflow.ExecuteChildWorkflow(ctx, ApprovalWorkflow, input)
-
-// Child workflow:
-// 1. Send notification
-// 2. Wait for signal OR timeout
-// 3. Return decision
-```
-
-✅ **Signal-based pattern**
-```go
-// Workflow waits for signal
-signalChan := workflow.GetSignalChannel(ctx, "approval-decision")
-selector := workflow.NewSelector(ctx)
-selector.AddReceive(signalChan, func(c workflow.ReceiveChannel, more bool) {
-    c.Receive(ctx, &decision)
-})
-selector.AddFuture(workflow.NewTimer(ctx, 72*time.Hour), func(f workflow.Future) {
-    // Auto-reject on timeout
-})
-selector.Select(ctx)
-```
-
-### **#6: COMPLETE ALL TODOs**
-
-✅ **No incomplete implementations allowed**
-- All validation rules must be implemented
-- All integrations properly mocked or implemented
-- All error handling complete
-- All business rules enforced
-
-### **#7: REPOSITORY PATTERNS**
-
-✅ **Atomic update methods**
-```go
-// Repository method for atomic operations
-func (r *Repo) SaveFormDataAndUpdateWorkflowStateReturning(
-    ctx context.Context,
-    sessionID string,
-    formData string,
-    workflowState string,
-    currentStep string,
-    nextStep string,
-    progress int,
-    updatedBy string,
-) (*Domain, error) {
-    // Single UPDATE...RETURNING query
-    query := psql.Update("table").
-        Set("form_data", formData).
-        Set("workflow_state", workflowState).
-        Set("current_step", currentStep).
-        Set("next_step", nextStep).
-        Set("progress_percentage", progress).
-        Set("last_updated_by", updatedBy).
-        Set("updated_at", time.Now()).
-        Where(sq.Eq{"session_id": sessionID}).
-        Suffix("RETURNING *")
-
-    var result Domain
-    err := dblib.SelectOne(ctx, r.db, query, pgx.RowToStructByNameLax[Domain], &result)
-    return &result, err
-}
-```
+**Last Updated**: 2026-01-27
+**Branch**: `claude/develop-policy-apis-golang-BcDD3`
+**Latest Commit**: `e640d68` - Final database optimizations
 
 ---
 
-## 📊 PHASES COMPLETED
+## CRITICAL: Database Optimization Requirements
 
-### **Phase 1-3: Infrastructure** ✅
-- Database setup with DDL scripts
-- Go project initialization with FX
-- Configuration files (base + dev + test)
-- Port layer (request/response)
-- 8 domain models with business rules
-- 7 repositories with CTE patterns
-- db/utility.go for CTE support
+### ⚠️ GOLDEN RULE: MINIMIZE DATABASE ROUND TRIPS
 
-**Key Learning**: CTE patterns required because pgx.Batch doesn't share variables between queries
+**User's Explicit Feedback**: "Can you remember what I said. Reduce number of hits to database."
 
-### **Phase 4: Lookup & Validation APIs (11 endpoints)** ✅
-**APIs**:
-- AGT-007 to AGT-011: Lookup APIs (5 endpoints)
-- AGT-012 to AGT-015: Validation APIs (4 endpoints)
-- AGT-020 to AGT-021: Workflow APIs (2 endpoints)
-
-**Key Achievement**: All integrated with repositories, no mocks
-
-### **Phase 5: Profile Creation + Temporal WF-002 (10 endpoints)** ✅
-**APIs**:
-- AGT-001 to AGT-006: Profile Creation (6 endpoints)
-- AGT-016 to AGT-019: Session Management (4 endpoints)
-
-**Infrastructure**:
-- Session storage table + repository
-- WF-002: Agent Onboarding Workflow (421 lines)
-- 18 activities (ACT-011 to ACT-028) + RecordWorkflowStartActivity
-- Approval child workflow (human-in-the-loop)
-- Bootstrap with Temporal registration
-
-**Performance**: 45% reduction in database round trips
-
-**Critical Fixes Applied**:
-1. Atomic batch methods in repositories (3 new methods)
-2. CreateWithRelatedEntities for bulk operations
-3. Workflow self-recording pattern
-4. All handlers use single round-trip operations
+This is the **HIGHEST PRIORITY** requirement. Every repository method and handler must be designed to minimize database round trips.
 
 ---
 
-## 🗂️ FILE STRUCTURE
+## Database Optimization Patterns (MUST FOLLOW)
 
-```
-pli-agent/
-├── bootstrap/
-│   └── bootstrapper.go          # FX modules, Temporal registration
-├── configs/
-│   ├── config.yaml              # Base config with Temporal settings
-│   ├── config.dev.yaml          # Dev config (Temporal enabled)
-│   └── config.test.yaml
-├── core/
-│   ├── domain/                  # Domain models (8 models)
-│   │   ├── agent_profile.go
-│   │   ├── agent_address.go
-│   │   ├── agent_contact.go
-│   │   ├── agent_email.go
-│   │   ├── agent_bank_details.go
-│   │   ├── agent_license.go
-│   │   ├── agent_audit_log.go
-│   │   └── agent_profile_session.go
-│   └── port/
-│       ├── request.go
-│       └── response.go
-├── db/
-│   ├── migrations/              # DDL scripts
-│   │   ├── 001_agent_profile_management.sql
-│   │   └── 002_agent_profile_sessions.sql
-│   └── utility.go               # CTE helper functions
-├── repo/postgres/               # Repositories (7 repos)
-│   ├── agent_profile.go         # + CreateWithRelatedEntities
-│   ├── agent_address.go
-│   ├── agent_contact.go
-│   ├── agent_email.go
-│   ├── agent_bank_details.go
-│   ├── agent_license.go
-│   ├── agent_audit_log.go
-│   └── agent_profile_session.go # + 3 atomic methods
-├── handler/
-│   ├── lookup.go                # AGT-007 to AGT-011
-│   ├── validation.go            # AGT-012 to AGT-015
-│   ├── workflow.go              # AGT-020 to AGT-021
-│   ├── profile_creation.go      # AGT-001 to AGT-006, AGT-016 to AGT-019
-│   ├── request.go               # All request DTOs
-│   └── response/
-│       ├── lookup.go
-│       ├── validation.go
-│       ├── workflow.go
-│       └── profile_creation.go
-├── workflows/
-│   ├── agent_onboarding_workflow.go   # WF-002 (with Step 0: record start)
-│   ├── approval_workflow.go           # Child workflow for approvals
-│   └── activities/
-│       └── agent_onboarding_activities.go  # 18 activities + RecordWorkflowStart
-└── main.go                      # Bootstrap with FxTemporal enabled
-```
+### 1. **Use Batch for Multiple Independent Queries**
 
----
-
-## 🔥 CRITICAL CODE PATTERNS
-
-### **Pattern 1: Repository Atomic Update with RETURNING**
+When you need to execute multiple queries that can run in parallel:
 
 ```go
-func (r *SessionRepo) SaveFormDataAndUpdateWorkflowStateReturning(
-    ctx context.Context,
-    sessionID string,
-    formData string,
-    workflowState string,
-    currentStep string,
-    nextStep string,
-    progress int,
-    updatedBy string,
-) (*domain.Session, error) {
-    cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
-    defer cancel()
+batch := &pgx.Batch{}
 
-    // Single UPDATE with RETURNING - atomic operation
-    query := dblib.Psql.Update(sessionTable).
-        Set("form_data", formData).
-        Set("workflow_state", workflowState).
-        Set("current_step", currentStep).
-        Set("next_step", nextStep).
-        Set("progress_percentage", progress).
-        Set("last_updated_by", updatedBy).
-        Set("updated_at", time.Now()).
-        Where(sq.Eq{"session_id": sessionID}).
-        Suffix("RETURNING *")
+// Queue all queries
+var result1 Type1
+dblib.QueueReturnRow(batch, query1, scanner1, &result1)
 
-    var result domain.Session
-    err := dblib.SelectOne(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.Session], &result)
-    return &result, err
-}
+var results2 []Type2
+dblib.QueueReturn(batch, query2, scanner2, &results2)
+
+// Execute in SINGLE round trip
+err := r.db.SendBatch(ctx, batch).Close()
 ```
 
-### **Pattern 2: Bulk Insert with UNNEST and CTE**
+**Examples**:
+- `Search()`: count query + data query → 1 batch
+- `GetHistory()`: count query + data query → 1 batch
+- `GetProfileWithRelatedEntities()`: profile + addresses + contacts + emails → 1 batch
+
+### 2. **Use CTE for Dependent Operations**
+
+When operations depend on each other (e.g., capture old values, update, insert audit):
 
 ```go
-func (r *ProfileRepo) CreateWithRelatedEntities(ctx context.Context, input CreateInput) (*domain.Profile, error) {
-    cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutHigh"))
-    defer cancel()
-
-    // Build arrays for UNNEST
-    var addrTypes []string
-    var addrLine1s []string
-    var addrCities []string
-    for _, addr := range input.Addresses {
-        addrTypes = append(addrTypes, addr.AddressType)
-        addrLine1s = append(addrLine1s, addr.Line1)
-        addrCities = append(addrCities, addr.City)
-    }
-
-    // Complex CTE with UNNEST for bulk insert
-    sql := `
-        WITH inserted_profile AS (
-            INSERT INTO agent_profiles (...)
-            VALUES ($1, $2, ...)
-            RETURNING *
-        ),
-        inserted_addresses AS (
-            INSERT INTO agent_addresses (agent_id, address_type, line1, city)
-            SELECT ip.agent_id, addr_type, addr_line1, addr_city
-            FROM inserted_profile ip
-            CROSS JOIN UNNEST($27::text[], $28::text[], $29::text[])
-                AS t(addr_type, addr_line1, addr_city)
-            WHERE ARRAY_LENGTH($27::text[], 1) > 0
-            RETURNING *
-        ),
-        inserted_audit AS (
-            INSERT INTO agent_audit_logs (agent_id, action_type, performed_by, performed_at)
-            SELECT agent_id, $48, $49, $50
-            FROM inserted_profile
-            RETURNING *
-        )
-        SELECT * FROM inserted_profile
-    `
-
-    args := []interface{}{
-        profile.FirstName, profile.LastName, ...,
-        addrTypes, addrLine1s, addrCities,  // Arrays for UNNEST
-        "CREATE", profile.CreatedBy, time.Now(),
-    }
-
-    batch := &pgx.Batch{}
-    var result domain.Profile
-    err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.Profile], &result)
-    if err != nil {
-        return nil, err
-    }
-
-    err = r.db.SendBatch(cCtx, batch).Close()
-    return &result, err
-}
-```
-
-### **Pattern 3: Handler Using Atomic Repository Method**
-
-```go
-func (h *Handler) FetchHRMSData(sctx *serverRoute.Context, req FetchHRMSRequest) (*Response, error) {
-    // Verify session exists
-    session, err := h.sessionRepo.FindByID(sctx.Ctx, req.SessionID)
-    if err != nil {
-        return nil, err
-    }
-
-    // Fetch HRMS data
-    hrmsData := fetchFromHRMS(req.EmployeeID)
-    formDataJSON, _ := json.Marshal(hrmsData)
-
-    // ATOMIC: Save form data + update workflow state in single round trip
-    _, err = h.sessionRepo.SaveFormDataAndUpdateWorkflowStateReturning(
-        sctx.Ctx,
-        req.SessionID,
-        string(formDataJSON),
-        domain.WorkflowStateHRMSFetched,
-        "HRMS_DATA_FETCHED",
-        "PROFILE_DETAILS",
-        30,
-        req.SessionID,
+sql := `
+    WITH old_data AS (
+        SELECT * FROM table WHERE id = $1
+    ),
+    updated_data AS (
+        UPDATE table SET ... WHERE id = $1 RETURNING *
+    ),
+    audit_insert AS (
+        INSERT INTO audit_logs (...)
+        SELECT ... FROM old_data
+        WHERE old_value IS DISTINCT FROM new_value
     )
-    if err != nil {
-        return nil, err
-    }
-
-    return &Response{
-        StatusCodeAndMessage: port.FetchSuccess,
-        EmployeeData:         hrmsData,
-    }, nil
-}
+    SELECT row_to_json(t.*) FROM updated_data t
+`
 ```
 
-### **Pattern 4: Workflow with Self-Recording**
+**Examples**:
+- `UpdateSectionReturning()`: capture old + update + audit insert → 1 CTE
+- `ApproveAndApplyUpdates()`: fetch request + approve → 1 CTE
+- `RejectAndReturn()`: fetch request + reject → 1 CTE
+
+### 3. **Use UNNEST for Bulk Operations**
+
+For bulk inserts/operations on arrays:
 
 ```go
-func AgentOnboardingWorkflow(ctx workflow.Context, input OnboardingInput) (*OnboardingOutput, error) {
-    logger := workflow.GetLogger(ctx)
-
-    // Setup activity options
-    ao := workflow.ActivityOptions{
-        StartToCloseTimeout: time.Minute,
-        RetryPolicy: &temporal.RetryPolicy{
-            InitialInterval:    time.Second,
-            BackoffCoefficient: 2.0,
-            MaximumInterval:    time.Minute,
-            MaximumAttempts:    3,
-        },
-    }
-    ctx = workflow.WithActivityOptions(ctx, ao)
-
-    var a *activities.AgentOnboardingActivities
-
-    // Step 0: Record Workflow Start (FIRST ACTIVITY - CRITICAL)
-    // This makes the workflow self-recording and self-healing
-    logger.Info("Step 0: Recording workflow start in database")
-    workflowInfo := workflow.GetInfo(ctx)
-    var recordStartResult activities.RecordWorkflowStartOutput
-    err := workflow.ExecuteActivity(ctx, a.RecordWorkflowStartActivity, activities.RecordWorkflowStartInput{
-        SessionID:     input.SessionID,
-        WorkflowID:    workflowInfo.WorkflowExecution.ID,
-        RunID:         workflowInfo.WorkflowExecution.RunID,
-        WorkflowState: domain.WorkflowStateProfileSubmitting,
-        CurrentStep:   "PROFILE_SUBMITTED",
-        NextStep:      "VALIDATION",
-        Progress:      10,
-        SubmittedBy:   input.SubmittedBy,
-    }).Get(ctx, &recordStartResult)
-    if err != nil {
-        return nil, fmt.Errorf("failed to record workflow start: %w", err)
-    }
-
-    // Step 1: Validate Agent Type
-    // ... rest of workflow
-}
-```
-
-### **Pattern 5: Activity with Repository Integration**
-
-```go
-func (a *Activities) RecordWorkflowStartActivity(ctx context.Context, input RecordWorkflowStartInput) (*RecordWorkflowStartOutput, error) {
-    logger := activity.GetLogger(ctx)
-    logger.Info("RecordWorkflowStartActivity started", "SessionID", input.SessionID)
-
-    activity.RecordHeartbeat(ctx, "Recording workflow start in database")
-
-    // ATOMIC: Link Temporal workflow + update state in single database round trip
-    _, err := a.sessionRepo.LinkTemporalWorkflowAndUpdateStateReturning(
-        ctx,
-        input.SessionID,
-        input.WorkflowID,
-        input.RunID,
-        input.WorkflowState,
-        input.CurrentStep,
-        input.NextStep,
-        input.Progress,
-        input.SubmittedBy,
+sql := `
+    INSERT INTO table (col1, col2, col3)
+    SELECT * FROM UNNEST(
+        $1::text[],
+        $2::text[],
+        $3::text[]
     )
-    if err != nil {
-        logger.Error("Failed to record workflow start in database", "error", err)
-        return nil, fmt.Errorf("failed to record workflow start: %w", err)
-    }
+`
+r.db.Exec(ctx, sql, array1, array2, array3)
+```
 
-    return &RecordWorkflowStartOutput{
-        Recorded: true,
-        Message:  "Workflow start recorded in database",
+**Examples**:
+- Bulk audit log insertion in `UpdateSectionReturning()`
+- Bulk inserts in `CreateWithRelatedEntities()`
+
+### 4. **Use RETURNING to Avoid Extra SELECT**
+
+Always use RETURNING clause instead of separate SELECT:
+
+```go
+// ❌ BAD: 2 round trips
+UPDATE table SET ... WHERE id = $1
+SELECT * FROM table WHERE id = $1
+
+// ✅ GOOD: 1 round trip
+UPDATE table SET ... WHERE id = $1 RETURNING *
+```
+
+---
+
+## Phase 6 Performance Metrics (ACHIEVED)
+
+| Endpoint | Method | Database Calls | Technique |
+|----------|--------|----------------|-----------|
+| AGT-022: Search Agents | Search() | **1** | Batch (count + data) |
+| AGT-023: Get Profile | GetProfileWithRelatedEntities() | **1** | Batch (4 queries) |
+| AGT-024: Get Update Form | GetUpdateForm() | 1 | Single SELECT |
+| AGT-025: Update Section | UpdateSectionReturning() | **1** | CTE (old + update + audit) |
+| AGT-026: Approve Update | ApproveProfileUpdate() | **2** | CTE + CTE |
+| AGT-027: Reject Update | RejectProfileUpdate() | **1** | CTE |
+| AGT-028: Audit History | GetHistory() | **1** | Batch (count + data) |
+
+---
+
+## Critical Issues Fixed in This Session
+
+### Issue 1: UpdateSectionReturning - Separate Audit Insert
+**Problem**: Audit INSERT was a separate database call after batch
+**Solution**: Combined everything in single CTE with UNNEST
+**Reduction**: 2 → 1 round trips
+
+### Issue 2: ApproveProfileUpdate - 3 Separate Calls
+**Problem**: FindByID() + UpdateSectionReturning() + Approve()
+**Solution**: Created ApproveAndApplyUpdates() CTE method
+**Reduction**: 3 → 2 round trips
+
+### Issue 3: RejectProfileUpdate - 2 Separate Calls
+**Problem**: FindByID() + Reject()
+**Solution**: Created RejectAndReturn() CTE method
+**Reduction**: 2 → 1 round trips
+
+### Issue 4: Wrong Database Interface Type
+**Problem**: `dblib.XODB` in AgentProfileUpdateRequestRepository
+**Solution**: Changed to `dblib.DB`
+**Status**: Fixed ✅
+
+---
+
+## Repository Pattern (ESTABLISHED)
+
+### Standard Repository Structure
+
+```go
+type XxxRepository struct {
+    db  dblib.DB  // ← ALWAYS use dblib.DB, NOT dblib.XODB
+    cfg *config.Config
+}
+
+func NewXxxRepository(db dblib.DB, cfg *config.Config) *XxxRepository {
+    return &XxxRepository{db: db, cfg: cfg}
+}
+```
+
+### Timeout Pattern
+
+```go
+cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+defer cancel()
+```
+
+Timeout levels:
+- `QueryTimeoutLow`: Simple queries (SELECT by ID, single updates)
+- `QueryTimeoutMed`: Complex queries (CTEs, batches, multiple JOINs)
+- `QueryTimeoutHigh`: Very complex operations (bulk operations)
+
+### Error Handling Pattern
+
+```go
+err := dblib.SelectOne(cCtx, r.db, query, scanner, &result)
+if err != nil {
+    return nil, fmt.Errorf("failed to [operation]: %w", err)
+}
+```
+
+Always wrap errors with context using `fmt.Errorf` with `%w`.
+
+---
+
+## Handler Pattern (ESTABLISHED)
+
+### Handler Structure
+
+```go
+type XxxHandler struct {
+    *serverHandler.Base
+    repo1 *repo.Xxx1Repository
+    repo2 *repo.Xxx2Repository
+}
+
+func NewXxxHandler(repo1 *repo.Xxx1Repository, repo2 *repo.Xxx2Repository) *XxxHandler {
+    base := serverHandler.New("Description").SetPrefix("/v1").AddPrefix("")
+    return &XxxHandler{
+        Base:  base,
+        repo1: repo1,
+        repo2: repo2,
+    }
+}
+```
+
+### Route Registration
+
+```go
+func (h *XxxHandler) Routes() []serverRoute.Route {
+    return []serverRoute.Route{
+        serverRoute.GET("/path", h.HandlerMethod).Name("Description"),
+        serverRoute.POST("/path", h.HandlerMethod).Name("Description"),
+    }
+}
+```
+
+### Handler Method Signature
+
+```go
+func (h *XxxHandler) HandlerMethod(
+    sctx *serverRoute.Context,
+    req RequestDTO,
+) (*ResponseDTO, error) {
+    log.Info(sctx.Ctx, "Message")
+
+    // Business logic
+
+    return &ResponseDTO{
+        StatusCodeAndMessage: port.SuccessMessage,
+        // ... fields
     }, nil
 }
 ```
 
 ---
 
-## 📋 PHASE 6: PROFILE UPDATE APIs (AGT-022 to AGT-028)
+## SQL Patterns and Best Practices
 
-### **Scope: 7 Endpoints**
+### 1. Parameterized Queries (ALWAYS)
 
-1. **AGT-022**: GET /agents/search - Multi-criteria agent search
-2. **AGT-023**: GET /agents/{agent_id} - Get agent profile details
-3. **AGT-024**: GET /agents/{agent_id}/update-form - Get update form
-4. **AGT-025**: PUT /agents/{agent_id}/sections/{section} - Update profile section
-5. **AGT-026**: PUT /approvals/{approval_request_id}/approve - Approve update
-6. **AGT-027**: PUT /approvals/{approval_request_id}/reject - Reject update
-7. **AGT-028**: GET /agents/{agent_id}/audit-history - Get audit history
+```go
+// ❌ BAD: SQL injection risk
+sql := fmt.Sprintf("SELECT * FROM table WHERE id = '%s'", userInput)
 
-### **Key Requirements**
+// ✅ GOOD: Parameterized
+sql := "SELECT * FROM table WHERE id = $1"
+r.db.QueryRow(ctx, sql, userInput)
+```
 
-✅ **FR-AGT-PRF-004**: Multi-criteria agent search
-✅ **FR-AGT-PRF-005**: Profile dashboard view
-✅ **FR-AGT-PRF-006**: Personal information update
-✅ **FR-AGT-PRF-007**: PAN update
-✅ **FR-AGT-PRF-008**: Address management
-✅ **FR-AGT-PRF-009**: Contact information update
-✅ **FR-AGT-PRF-022**: Audit history
+### 2. NULL-Safe Comparisons
 
-✅ **BR-AGT-PRF-005**: Name update with audit logging
-✅ **BR-AGT-PRF-006**: PAN update with uniqueness validation
-✅ **BR-AGT-PRF-007**: Personal information update rules
+Use `IS DISTINCT FROM` for NULL-safe comparisons:
 
-✅ **WF-AGT-PRF-002**: Profile Update Workflow (with approval for critical fields)
+```sql
+WHERE old_value IS DISTINCT FROM new_value
+```
 
-### **Critical Fields Requiring Approval**
-- Name changes (first_name, middle_name, last_name)
-- PAN changes
-- Aadhar changes
+This handles NULL correctly (NULL != NULL returns false, but NULL IS DISTINCT FROM NULL returns false).
 
-### **Implementation Strategy**
+### 3. JSON Handling
 
-1. **Repository Layer** (single round trips):
-   - Search method with filters
-   - Update methods with RETURNING
-   - Audit log creation in same transaction
+Return complex objects as JSON:
 
-2. **Handler Layer**:
-   - AGT-022: Search with pagination
-   - AGT-023: Get profile with related entities (1 query with JOINs)
-   - AGT-024: Get update form (pre-populated)
-   - AGT-025: Update section (checks if approval needed)
-   - AGT-026/027: Approval handlers (signal to workflow)
-   - AGT-028: Audit history with pagination
+```sql
+SELECT row_to_json(t.*) FROM (
+    SELECT * FROM table WHERE id = $1
+) t
+```
 
-3. **Workflow** (if needed):
-   - ProfileUpdateWorkflow (child workflow for critical fields)
-   - Activities: ValidateUpdate, ApplyUpdate, NotifyUser
+Parse in Go:
 
----
+```go
+var jsonData []byte
+err := r.db.QueryRow(ctx, sql, id).Scan(&jsonData)
 
-## 🚀 NEXT SESSION CHECKLIST
+var result domain.Type
+err = json.Unmarshal(jsonData, &result)
+```
 
-When starting Phase 6:
+### 4. Array Operations with UNNEST
 
-1. ✅ Read this context file
-2. ✅ Apply all critical patterns (single round trips, atomicity, CTE, UNNEST)
-3. ✅ Create repository methods first
-4. ✅ Add atomic update methods with RETURNING
-5. ✅ Implement handlers using repository methods
-6. ✅ Add request/response DTOs
-7. ✅ Register handlers in bootstrap
-8. ✅ Complete all TODOs before finishing
-9. ✅ Format and commit
+Expand arrays into rows:
 
-**Performance Target**: Maintain single database round trip per operation
+```sql
+SELECT unnest(ARRAY['val1', 'val2', 'val3'])
+```
 
-**Quality Target**: Zero compilation errors, production-ready code
+Use in bulk operations:
 
-**Testing Promise**: Comprehensive tests in Phase 11
+```sql
+INSERT INTO table (col1, col2)
+SELECT * FROM UNNEST($1::text[], $2::int[])
+```
 
 ---
 
-**END OF CONTEXT DOCUMENT**
+## Common Mistakes to Avoid
+
+### ❌ Don't Do This
+
+1. **Multiple separate database calls when batch is possible**
+2. **Separate SELECT after UPDATE**
+3. **Loop inserts instead of bulk**
+4. **Not using CTEs for dependent operations**
+5. **Using dblib.XODB instead of dblib.DB**
+
+### ✅ Do This Instead
+
+1. **Use batch for parallel queries**
+2. **Use RETURNING clause**
+3. **Use UNNEST for bulk operations**
+4. **Use CTE for dependent operations**
+5. **Use dblib.DB consistently**
+
+---
+
+## Critical Fields and Business Rules
+
+### Critical Fields (Require Approval)
+
+```go
+criticalFields := map[string]bool{
+    "first_name":    true,
+    "middle_name":   true,
+    "last_name":     true,
+    "pan_number":    true,
+    "aadhar_number": true,
+}
+```
+
+### Business Rules Implemented
+
+- **BR-AGT-PRF-005**: Name updates require approval + audit logging
+- **BR-AGT-PRF-006**: PAN updates require approval + validation
+- **BR-AGT-PRF-022**: Multi-criteria agent search with pagination
+- **FR-AGT-PRF-004**: Multi-criteria search functionality
+- **FR-AGT-PRF-005**: Profile dashboard view with related entities
+- **FR-AGT-PRF-006**: Profile updates with approval workflow
+- **FR-AGT-PRF-022**: Audit trail for all changes
+
+---
+
+## Key Takeaways for Future Sessions
+
+1. **ALWAYS minimize database round trips** - This is non-negotiable
+2. **Use batch for parallel queries** - count + data, profile + related entities
+3. **Use CTE for dependent operations** - capture old, update, audit
+4. **Use UNNEST for bulk operations** - batch inserts, array operations
+5. **Use RETURNING to avoid extra SELECT** - UPDATE ... RETURNING *
+6. **Use dblib.DB, NOT dblib.XODB** - Standard interface type
+7. **Parameterize all queries** - Prevent SQL injection
+8. **Use IS DISTINCT FROM for NULL-safe comparisons** - Handle NULLs correctly
+9. **Return complex objects as JSON when needed** - row_to_json()
+10. **Follow established patterns** - Don't reinvent the wheel
+
+---
+
+## Files to Reference
+
+**Critical Pattern Examples**:
+- `repo/postgres/agent_profile.go` - Search, GetProfileWithRelatedEntities, UpdateSectionReturning
+- `repo/postgres/agent_audit_log.go` - GetHistory with batch
+- `repo/postgres/agent_profile_update_request.go` - CTE examples
+- `handler/profile_update.go` - Complete handler implementation
+
+**Documentation**:
+- `PHASE_6_IMPLEMENTATION_PLAN.md` - Original plan
+- `BR_AGT_PRF_016_REINSTATEMENT_WORKFLOW.md` - Workflow details
+- `PHASE_8_9_10_CONTEXT.md` - Future phases specifications
+- `PHASE_7_ISSUE_ANALYSIS.md` - Issues with Phase 7 branch
+
+---
+
+**⚠️ REMEMBER**: Read this file at the start of every session to maintain context and follow established patterns!
