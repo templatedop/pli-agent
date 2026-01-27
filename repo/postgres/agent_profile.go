@@ -2,7 +2,9 @@ package repo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
@@ -798,7 +800,7 @@ func (r *AgentProfileRepository) GetProfileWithRelatedEntities(
 // AGT-025: Update Profile Section
 // FR-AGT-PRF-006: Personal Information Update
 // BR-AGT-PRF-005: Name Update with Audit Logging
-// CRITICAL: Single database round trip using batch with UPDATE + Bulk INSERT audit logs using UNNEST
+// CRITICAL: Single SQL statement using CTE (capture old + UPDATE + bulk audit INSERT + return updated)
 func (r *AgentProfileRepository) UpdateSectionReturning(
 	ctx context.Context,
 	agentID string,
@@ -808,105 +810,93 @@ func (r *AgentProfileRepository) UpdateSectionReturning(
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
 	defer cancel()
 
-	batch := &pgx.Batch{}
-
-	// Query 1: Get old profile values for audit
-	oldProfileQuery := dblib.Psql.Select("*").
-		From(agentProfileTable).
-		Where(sq.And{
-			sq.Eq{"agent_id": agentID},
-			sq.Eq{"deleted_at": nil},
-		})
-
-	var oldProfile domain.AgentProfile
-	err := dblib.QueueReturnRow(batch, oldProfileQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &oldProfile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to queue old profile query: %w", err)
-	}
-
-	// Query 2: Update profile with RETURNING
-	updateQuery := dblib.Psql.Update(agentProfileTable).
-		Set("updated_at", time.Now()).
-		Set("updated_by", updatedBy).
-		Set("version", sq.Expr("version + 1")).
-		Where(sq.And{
-			sq.Eq{"agent_id": agentID},
-			sq.Eq{"deleted_at": nil},
-		})
-
-	// Add dynamic fields from updates map
-	for field, value := range updates {
-		updateQuery = updateQuery.Set(field, value)
-	}
-	updateQuery = updateQuery.Suffix("RETURNING *")
-
-	var updatedProfile domain.AgentProfile
-	err = dblib.QueueReturnRow(batch, updateQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &updatedProfile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to queue update query: %w", err)
-	}
-
-	// Execute first two queries
-	err = r.db.SendBatch(cCtx, batch).Close()
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute update batch: %w", err)
-	}
-
-	// Query 3: Bulk insert audit logs using UNNEST
-	// Prepare arrays for changed fields only
-	var (
-		agentIDs     []string
-		actionTypes  []string
-		fieldNames   []string
-		oldValues    []string
-		newValues    []string
-		performedBys []string
-		performedAts []time.Time
-	)
-
 	now := time.Now()
-	for field, newValue := range updates {
-		oldValue := getFieldValue(&oldProfile, field)
-		newValueStr := fmt.Sprintf("%v", newValue)
-		oldValueStr := fmt.Sprintf("%v", oldValue)
 
-		// Only log if value actually changed
-		if oldValueStr != newValueStr {
-			agentIDs = append(agentIDs, agentID)
-			actionTypes = append(actionTypes, domain.AuditActionUpdate)
-			fieldNames = append(fieldNames, field)
-			oldValues = append(oldValues, oldValueStr)
-			newValues = append(newValues, newValueStr)
-			performedBys = append(performedBys, updatedBy)
-			performedAts = append(performedAts, now)
-		}
+	// Build dynamic SET clauses with parameterized values
+	args := []interface{}{agentID, now, updatedBy}
+	argIndex := 4
+	var setClauses []string
+	var fieldNames []string
+	var oldValueSelects []string
+
+	for field, value := range updates {
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", field, argIndex))
+		args = append(args, value)
+		fieldNames = append(fieldNames, field)
+		oldValueSelects = append(oldValueSelects, fmt.Sprintf("old.%s::text", field))
+		argIndex++
 	}
 
-	// Only insert audit logs if there are changes
-	if len(fieldNames) > 0 {
-		auditSQL := `
+	// Build arrays for UNNEST: new values as text
+	var newValuesArray []string
+	for _, value := range updates {
+		newValuesArray = append(newValuesArray, fmt.Sprintf("%v", value))
+	}
+	args = append(args, newValuesArray) // $argIndex
+
+	// Build CTE: capture old -> update -> insert audits for changed fields -> return updated profile as JSON
+	sql := fmt.Sprintf(`
+		WITH old_profile AS (
+			SELECT * FROM agent_profiles
+			WHERE agent_id = $1 AND deleted_at IS NULL
+		),
+		updated_profile AS (
+			UPDATE agent_profiles
+			SET
+				updated_at = $2,
+				updated_by = $3,
+				version = version + 1,
+				%s
+			WHERE agent_id = $1 AND deleted_at IS NULL
+			RETURNING *
+		),
+		audit_changes AS (
+			SELECT
+				unnest(ARRAY['%s']::text[]) as field_name,
+				unnest(ARRAY[%s]) as old_value,
+				unnest($%d::text[]) as new_value
+			FROM old_profile
+		),
+		inserted_audits AS (
 			INSERT INTO agent_audit_logs (
 				agent_id, action_type, field_name, old_value, new_value,
 				performed_by, performed_at
 			)
-			SELECT * FROM UNNEST(
-				$1::text[],
-				$2::text[],
-				$3::text[],
-				$4::text[],
-				$5::text[],
-				$6::text[],
-				$7::timestamptz[]
-			)
-		`
-		_, err = r.db.Exec(cCtx, auditSQL, agentIDs, actionTypes, fieldNames, oldValues, newValues, performedBys, performedAts)
-		if err != nil {
-			// Log error but don't fail the update
-			return &updatedProfile, fmt.Errorf("profile updated but audit log failed: %w", err)
-		}
+			SELECT
+				$1,
+				'%s',
+				field_name,
+				old_value,
+				new_value,
+				$3,
+				$2
+			FROM audit_changes
+			WHERE old_value IS DISTINCT FROM new_value
+			RETURNING audit_log_id
+		)
+		SELECT row_to_json(t.*) FROM updated_profile t`,
+		strings.Join(setClauses, ",\n\t\t\t\t"),
+		strings.Join(fieldNames, "', '"),
+		strings.Join(oldValueSelects, ", "),
+		argIndex,
+		domain.AuditActionUpdate,
+	)
+
+	// Execute CTE and get updated profile as JSON
+	var profileJSON []byte
+	err := r.db.QueryRow(cCtx, sql, args...).Scan(&profileJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update profile with audit: %w", err)
 	}
 
-	return &updatedProfile, nil
+	// Parse JSON to struct
+	var result domain.AgentProfile
+	err = json.Unmarshal(profileJSON, &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse updated profile: %w", err)
+	}
+
+	return &result, nil
 }
 
 // Helper function to get field value from profile

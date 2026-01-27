@@ -417,44 +417,12 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 // AGT-026: Approve Profile Update
 // BR-AGT-PRF-005: Name Update with Audit Logging
 // BR-AGT-PRF-006: PAN Update with Validation
+// OPTIMIZED: 2 database calls (approve+getUpdates in 1, apply updates in 1)
 func (h *AgentProfileUpdateHandler) ApproveProfileUpdate(sctx *serverRoute.Context, req ApprovalRequest) (*resp.ApprovalResponse, error) {
 	log.Info(sctx.Ctx, "Approving profile update request: %s", req.ApprovalRequestID)
 
-	// Get the update request
-	updateRequest, err := h.updateRequestRepo.FindByID(sctx.Ctx, req.ApprovalRequestID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error fetching update request: %v", err)
-		return nil, err
-	}
-
-	// Check if already processed
-	if updateRequest.Status != domain.UpdateRequestStatusPending {
-		log.Warn(sctx.Ctx, "Update request already processed: %s", updateRequest.Status)
-		return nil, fmt.Errorf("update request already processed with status: %s", updateRequest.Status)
-	}
-
-	// Parse field updates from JSON
-	var fieldUpdates map[string]interface{}
-	err = updateRequest.FieldUpdates.Scan(&fieldUpdates)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error parsing field updates: %v", err)
-		return nil, fmt.Errorf("failed to parse field updates: %w", err)
-	}
-
-	// Apply the updates to profile
-	updatedProfile, err := h.profileRepo.UpdateSectionReturning(
-		sctx.Ctx,
-		updateRequest.AgentID,
-		fieldUpdates,
-		req.ApprovedBy,
-	)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error applying profile updates: %v", err)
-		return nil, err
-	}
-
-	// Mark request as approved
-	_, err = h.updateRequestRepo.Approve(
+	// Approve request and get field updates in SINGLE database call
+	approvedRequest, fieldUpdates, err := h.updateRequestRepo.ApproveAndApplyUpdates(
 		sctx.Ctx,
 		req.ApprovalRequestID,
 		req.ApprovedBy,
@@ -465,13 +433,25 @@ func (h *AgentProfileUpdateHandler) ApproveProfileUpdate(sctx *serverRoute.Conte
 		return nil, err
 	}
 
-	log.Info(sctx.Ctx, "Profile update approved and applied for agent: %s", updateRequest.AgentID)
+	// Apply the updates to profile (single CTE with audit logs)
+	updatedProfile, err := h.profileRepo.UpdateSectionReturning(
+		sctx.Ctx,
+		approvedRequest.AgentID,
+		fieldUpdates,
+		req.ApprovedBy,
+	)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error applying profile updates: %v", err)
+		return nil, err
+	}
+
+	log.Info(sctx.Ctx, "Profile update approved and applied for agent: %s", approvedRequest.AgentID)
 
 	return &resp.ApprovalResponse{
 		StatusCodeAndMessage: port.ApprovalSuccess,
 		ApprovalRequestID:    req.ApprovalRequestID,
 		Status:               domain.UpdateRequestStatusApproved,
-		AgentID:              updateRequest.AgentID,
+		AgentID:              approvedRequest.AgentID,
 		ApprovedBy:           req.ApprovedBy,
 		ProcessedAt:          time.Now(),
 		Message:              fmt.Sprintf("Profile update approved and applied successfully. Updated %d fields.", len(fieldUpdates)),
@@ -487,24 +467,12 @@ func (h *AgentProfileUpdateHandler) ApproveProfileUpdate(sctx *serverRoute.Conte
 // RejectProfileUpdate rejects a profile update request
 // AGT-027: Reject Profile Update
 // BR-AGT-PRF-005: Name Update with Audit Logging (rejected requests also logged)
+// OPTIMIZED: 1 database call (fetch+reject in single query)
 func (h *AgentProfileUpdateHandler) RejectProfileUpdate(sctx *serverRoute.Context, req ApprovalRequest) (*resp.ApprovalResponse, error) {
 	log.Info(sctx.Ctx, "Rejecting profile update request: %s", req.ApprovalRequestID)
 
-	// Get the update request
-	updateRequest, err := h.updateRequestRepo.FindByID(sctx.Ctx, req.ApprovalRequestID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error fetching update request: %v", err)
-		return nil, err
-	}
-
-	// Check if already processed
-	if updateRequest.Status != domain.UpdateRequestStatusPending {
-		log.Warn(sctx.Ctx, "Update request already processed: %s", updateRequest.Status)
-		return nil, fmt.Errorf("update request already processed with status: %s", updateRequest.Status)
-	}
-
-	// Mark request as rejected (changes are NOT applied)
-	_, err = h.updateRequestRepo.Reject(
+	// Reject request and get rejected request data in SINGLE database call
+	rejectedRequest, err := h.updateRequestRepo.RejectAndReturn(
 		sctx.Ctx,
 		req.ApprovalRequestID,
 		req.RejectedBy,
@@ -515,16 +483,16 @@ func (h *AgentProfileUpdateHandler) RejectProfileUpdate(sctx *serverRoute.Contex
 		return nil, err
 	}
 
-	log.Info(sctx.Ctx, "Profile update rejected for agent: %s", updateRequest.AgentID)
+	log.Info(sctx.Ctx, "Profile update rejected for agent: %s", rejectedRequest.AgentID)
 
 	return &resp.ApprovalResponse{
 		StatusCodeAndMessage: port.RejectionSuccess,
 		ApprovalRequestID:    req.ApprovalRequestID,
 		Status:               domain.UpdateRequestStatusRejected,
-		AgentID:              updateRequest.AgentID,
+		AgentID:              rejectedRequest.AgentID,
 		RejectedBy:           req.RejectedBy,
 		ProcessedAt:          time.Now(),
-		Message:              "Profile update rejected",
+		Message:              "Profile update rejected - changes not applied",
 	}, nil
 }
 

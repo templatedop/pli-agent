@@ -19,12 +19,12 @@ const agentProfileUpdateRequestTable = "agent_profile_update_requests"
 
 // AgentProfileUpdateRequestRepository handles profile update request operations
 type AgentProfileUpdateRequestRepository struct {
-	db  dblib.XODB
+	db  dblib.DB
 	cfg *config.Config
 }
 
 // NewAgentProfileUpdateRequestRepository creates a new update request repository
-func NewAgentProfileUpdateRequestRepository(db dblib.XODB, cfg *config.Config) *AgentProfileUpdateRequestRepository {
+func NewAgentProfileUpdateRequestRepository(db dblib.DB, cfg *config.Config) *AgentProfileUpdateRequestRepository {
 	return &AgentProfileUpdateRequestRepository{
 		db:  db,
 		cfg: cfg,
@@ -195,4 +195,123 @@ func (r *AgentProfileUpdateRequestRepository) ListByAgentID(
 	}
 
 	return results, nil
+}
+
+// ApproveAndApplyUpdates approves request and returns both request and field updates in SINGLE database call
+// AGT-026: Approve Profile Update - Optimized version
+// Returns: approved request and field updates to apply
+func (r *AgentProfileUpdateRequestRepository) ApproveAndApplyUpdates(
+	ctx context.Context,
+	requestID string,
+	approvedBy string,
+	comments string,
+) (*domain.AgentProfileUpdateRequest, map[string]interface{}, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	now := time.Now()
+
+	// Use CTE to fetch request + mark as approved in single query
+	sql := `
+		WITH request_data AS (
+			SELECT * FROM agent_profile_update_requests
+			WHERE request_id = $1 AND status = $2 AND deleted_at IS NULL
+		),
+		approved_request AS (
+			UPDATE agent_profile_update_requests
+			SET
+				status = $3,
+				approved_by = $4,
+				approved_at = $5,
+				comments = $6,
+				updated_at = $5
+			WHERE request_id = $1 AND status = $2 AND deleted_at IS NULL
+			RETURNING *
+		)
+		SELECT
+			r.request_id, r.agent_id, r.section, r.field_updates, r.reason,
+			r.requested_by, r.requested_at, r.status, r.approved_by, r.approved_at,
+			r.rejected_by, r.rejected_at, r.comments, r.created_at, r.updated_at, r.deleted_at
+		FROM approved_request r
+	`
+
+	var result domain.AgentProfileUpdateRequest
+	err := r.db.QueryRow(cCtx, sql,
+		requestID,
+		domain.UpdateRequestStatusPending,
+		domain.UpdateRequestStatusApproved,
+		approvedBy,
+		now,
+		comments,
+	).Scan(
+		&result.RequestID, &result.AgentID, &result.Section, &result.FieldUpdates,
+		&result.Reason, &result.RequestedBy, &result.RequestedAt, &result.Status,
+		&result.ApprovedBy, &result.ApprovedAt, &result.RejectedBy, &result.RejectedAt,
+		&result.Comments, &result.CreatedAt, &result.UpdatedAt, &result.DeletedAt,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to approve update request: %w", err)
+	}
+
+	// Parse field updates from JSON
+	var fieldUpdates map[string]interface{}
+	if result.FieldUpdates.Valid {
+		err = json.Unmarshal([]byte(result.FieldUpdates.String), &fieldUpdates)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to parse field updates: %w", err)
+		}
+	}
+
+	return &result, fieldUpdates, nil
+}
+
+// RejectAndReturn rejects request and returns it in SINGLE database call
+// AGT-027: Reject Profile Update - Optimized version
+func (r *AgentProfileUpdateRequestRepository) RejectAndReturn(
+	ctx context.Context,
+	requestID string,
+	rejectedBy string,
+	comments string,
+) (*domain.AgentProfileUpdateRequest, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	now := time.Now()
+
+	// Use CTE to fetch + update in single query
+	sql := `
+		WITH request_data AS (
+			SELECT * FROM agent_profile_update_requests
+			WHERE request_id = $1 AND status = $2 AND deleted_at IS NULL
+		)
+		UPDATE agent_profile_update_requests
+		SET
+			status = $3,
+			rejected_by = $4,
+			rejected_at = $5,
+			comments = $6,
+			updated_at = $5
+		WHERE request_id = $1 AND status = $2 AND deleted_at IS NULL
+		RETURNING *
+	`
+
+	var result domain.AgentProfileUpdateRequest
+	err := r.db.QueryRow(cCtx, sql,
+		requestID,
+		domain.UpdateRequestStatusPending,
+		domain.UpdateRequestStatusRejected,
+		rejectedBy,
+		now,
+		comments,
+	).Scan(
+		&result.RequestID, &result.AgentID, &result.Section, &result.FieldUpdates,
+		&result.Reason, &result.RequestedBy, &result.RequestedAt, &result.Status,
+		&result.ApprovedBy, &result.ApprovedAt, &result.RejectedBy, &result.RejectedAt,
+		&result.Comments, &result.CreatedAt, &result.UpdatedAt, &result.DeletedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reject update request: %w", err)
+	}
+
+	return &result, nil
 }
