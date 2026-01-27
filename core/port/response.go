@@ -17,8 +17,6 @@ var (
 	ProfileCreateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "agent profile created successfully", Success: true}
 	ProfileUpdateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "agent profile updated successfully", Success: true}
 	ProfileFetchSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "profile retrieved successfully", Success: true}
-	LicenseCreateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "license created successfully", Success: true}
-	LicenseRenewSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license renewed successfully", Success: true}
 	StatusChangeSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "agent status updated successfully", Success: true}
 	ValidationSuccess    StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "validation successful", Success: true}
 	SessionCreateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "session created successfully", Success: true}
@@ -30,6 +28,18 @@ var (
 	ApprovalSuccess      StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "update approved successfully", Success: true}
 	RejectionSuccess     StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "update rejected successfully", Success: true}
 	AuditHistorySuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "audit history retrieved successfully", Success: true}
+
+	// License Management (Phase 7: AGT-029 to AGT-038)
+	LicenseListSuccess            StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "licenses retrieved successfully", Success: true}
+	LicenseCreateSuccess          StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "license created successfully", Success: true}
+	LicenseDetailSuccess          StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license details retrieved successfully", Success: true}
+	LicenseUpdateSuccess          StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license updated successfully", Success: true}
+	LicenseRenewSuccess           StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license renewed successfully", Success: true}
+	LicenseDeleteSuccess          StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license deleted successfully", Success: true}
+	LicenseTypeListSuccess        StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license types retrieved successfully", Success: true}
+	LicenseExpiringListSuccess    StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "expiring licenses retrieved successfully", Success: true}
+	LicenseReminderSuccess        StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license reminders retrieved successfully", Success: true}
+	LicenseBatchDeactivateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "batch deactivation completed successfully", Success: true}
 )
 
 // StatusCodeAndMessage is embedded in all response structs

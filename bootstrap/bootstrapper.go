@@ -27,9 +27,9 @@ var FxRepo = fx.Module(
 		repo.NewAgentBankDetailsRepository,
 		repo.NewAgentLicenseRepository,
 		repo.NewAgentAuditLogRepository,
-		repo.NewAgentProfileSessionRepository,         // Phase 5: Session management
-		repo.NewAgentProfileUpdateRequestRepository,   // Phase 6.1: Approval workflow
-		repo.NewAgentProfileFieldMetadataRepository,   // Phase 6.2: Dynamic field metadata
+		repo.NewAgentProfileSessionRepository,       // Phase 5: Session management
+		repo.NewAgentProfileUpdateRequestRepository, // Phase 6.1: Approval workflow
+		repo.NewAgentProfileFieldMetadataRepository, // Phase 6.2: Dynamic field metadata
 		// Add more repository constructors here as needed
 	),
 )
@@ -72,7 +72,13 @@ var FxHandler = fx.Module(
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// TODO: PHASE 7 - Add license management handlers
+		// PHASE 7: License Management APIs (AGT-029 to AGT-038)
+		// Agent License Handler with renewal rules and expiry management
+		fx.Annotate(
+			handler.NewAgentLicenseHandler,
+			fx.As(new(serverHandler.Handler)),
+			fx.ResultTags(serverHandler.ServerControllersGroupTag),
+		),
 		// TODO: PHASE 8 - Add status management handlers
 		// TODO: PHASE 9 - Add search and dashboard handlers
 		// TODO: PHASE 10 - Add batch and webhook handlers
