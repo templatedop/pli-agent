@@ -18,20 +18,23 @@ import (
 // AGT-022 to AGT-028: Profile Update & Search
 type AgentProfileUpdateHandler struct {
 	*serverHandler.Base
-	profileRepo  *repo.AgentProfileRepository
-	auditLogRepo *repo.AgentAuditLogRepository
+	profileRepo       *repo.AgentProfileRepository
+	auditLogRepo      *repo.AgentAuditLogRepository
+	updateRequestRepo *repo.AgentProfileUpdateRequestRepository
 }
 
 // NewAgentProfileUpdateHandler creates a new profile update handler
 func NewAgentProfileUpdateHandler(
 	profileRepo *repo.AgentProfileRepository,
 	auditLogRepo *repo.AgentAuditLogRepository,
+	updateRequestRepo *repo.AgentProfileUpdateRequestRepository,
 ) *AgentProfileUpdateHandler {
 	base := serverHandler.New("Agent Profile Update & Search APIs").SetPrefix("/v1").AddPrefix("")
 	return &AgentProfileUpdateHandler{
-		Base:         base,
-		profileRepo:  profileRepo,
-		auditLogRepo: auditLogRepo,
+		Base:              base,
+		profileRepo:       profileRepo,
+		auditLogRepo:      auditLogRepo,
+		updateRequestRepo: updateRequestRepo,
 	}
 }
 
@@ -318,28 +321,49 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 		}
 	}
 
-	// If requires approval, create approval request (placeholder for now)
+	// If requires approval, create approval request
 	if requiresApproval {
 		log.Info(sctx.Ctx, "Update requires approval for agent: %s", req.AgentID)
 
-		// TODO: Implement full approval workflow in Phase 6.1
-		// For now, return pending approval status
+		// Create approval request
+		updateRequest, err := h.updateRequestRepo.Create(
+			sctx.Ctx,
+			req.AgentID,
+			req.Section,
+			req.Updates,
+			req.Reason,
+			req.UpdatedBy,
+		)
+		if err != nil {
+			log.Error(sctx.Ctx, "Error creating approval request: %v", err)
+			return nil, err
+		}
 
 		updatedFields := make([]string, 0, len(req.Updates))
 		for field := range req.Updates {
 			updatedFields = append(updatedFields, field)
 		}
 
-		approvalRequestID := "placeholder-uuid" // TODO: Generate real UUID
+		// Build changed fields preview
+		changedFields := make(map[string]resp.ChangeInfo)
+		for field, newValue := range req.Updates {
+			changedFields[field] = resp.ChangeInfo{
+				OldValue: "", // Will be applied on approval
+				NewValue: fmt.Sprintf("%v", newValue),
+			}
+		}
+
+		log.Info(sctx.Ctx, "Approval request created: %s", updateRequest.RequestID)
 
 		return &resp.UpdateSectionResponse{
 			StatusCodeAndMessage: port.PendingApproval,
 			AgentID:              req.AgentID,
 			Section:              req.Section,
-			Status:               "PENDING_APPROVAL",
+			Status:               domain.UpdateRequestStatusPending,
 			UpdatedFields:        updatedFields,
 			ApprovalRequired:     true,
-			ApprovalRequestID:    &approvalRequestID,
+			ApprovalRequestID:    &updateRequest.RequestID,
+			ChangedFields:        changedFields,
 		}, nil
 	}
 
@@ -389,40 +413,115 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 	}, nil
 }
 
-// ApproveProfileUpdate approves a profile update request
+// ApproveProfileUpdate approves a profile update request and applies the changes
 // AGT-026: Approve Profile Update
-// TODO: Implement full workflow in Phase 6.1
+// BR-AGT-PRF-005: Name Update with Audit Logging
+// BR-AGT-PRF-006: PAN Update with Validation
 func (h *AgentProfileUpdateHandler) ApproveProfileUpdate(sctx *serverRoute.Context, req ApprovalRequest) (*resp.ApprovalResponse, error) {
 	log.Info(sctx.Ctx, "Approving profile update request: %s", req.ApprovalRequestID)
 
-	// TODO: Implement full approval workflow in Phase 6.1
-	// For now, return success response
+	// Get the update request
+	updateRequest, err := h.updateRequestRepo.FindByID(sctx.Ctx, req.ApprovalRequestID)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error fetching update request: %v", err)
+		return nil, err
+	}
+
+	// Check if already processed
+	if updateRequest.Status != domain.UpdateRequestStatusPending {
+		log.Warn(sctx.Ctx, "Update request already processed: %s", updateRequest.Status)
+		return nil, fmt.Errorf("update request already processed with status: %s", updateRequest.Status)
+	}
+
+	// Parse field updates from JSON
+	var fieldUpdates map[string]interface{}
+	err = updateRequest.FieldUpdates.Scan(&fieldUpdates)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error parsing field updates: %v", err)
+		return nil, fmt.Errorf("failed to parse field updates: %w", err)
+	}
+
+	// Apply the updates to profile
+	updatedProfile, err := h.profileRepo.UpdateSectionReturning(
+		sctx.Ctx,
+		updateRequest.AgentID,
+		fieldUpdates,
+		req.ApprovedBy,
+	)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error applying profile updates: %v", err)
+		return nil, err
+	}
+
+	// Mark request as approved
+	_, err = h.updateRequestRepo.Approve(
+		sctx.Ctx,
+		req.ApprovalRequestID,
+		req.ApprovedBy,
+		req.Comments,
+	)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error approving request: %v", err)
+		return nil, err
+	}
+
+	log.Info(sctx.Ctx, "Profile update approved and applied for agent: %s", updateRequest.AgentID)
 
 	return &resp.ApprovalResponse{
 		StatusCodeAndMessage: port.ApprovalSuccess,
 		ApprovalRequestID:    req.ApprovalRequestID,
-		Status:               "APPROVED",
-		AgentID:              "placeholder-agent-id",
+		Status:               domain.UpdateRequestStatusApproved,
+		AgentID:              updateRequest.AgentID,
 		ApprovedBy:           req.ApprovedBy,
 		ProcessedAt:          time.Now(),
-		Message:              "Profile update approved successfully",
+		Message:              fmt.Sprintf("Profile update approved and applied successfully. Updated %d fields.", len(fieldUpdates)),
+		UpdatedProfile: &resp.AgentProfileDTO{
+			AgentID:     updatedProfile.AgentID,
+			ProfileType: updatedProfile.AgentType,
+			PANNumber:   updatedProfile.PANNumber,
+			Status:      updatedProfile.Status,
+		},
 	}, nil
 }
 
 // RejectProfileUpdate rejects a profile update request
 // AGT-027: Reject Profile Update
-// TODO: Implement full workflow in Phase 6.1
+// BR-AGT-PRF-005: Name Update with Audit Logging (rejected requests also logged)
 func (h *AgentProfileUpdateHandler) RejectProfileUpdate(sctx *serverRoute.Context, req ApprovalRequest) (*resp.ApprovalResponse, error) {
 	log.Info(sctx.Ctx, "Rejecting profile update request: %s", req.ApprovalRequestID)
 
-	// TODO: Implement full approval workflow in Phase 6.1
-	// For now, return success response
+	// Get the update request
+	updateRequest, err := h.updateRequestRepo.FindByID(sctx.Ctx, req.ApprovalRequestID)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error fetching update request: %v", err)
+		return nil, err
+	}
+
+	// Check if already processed
+	if updateRequest.Status != domain.UpdateRequestStatusPending {
+		log.Warn(sctx.Ctx, "Update request already processed: %s", updateRequest.Status)
+		return nil, fmt.Errorf("update request already processed with status: %s", updateRequest.Status)
+	}
+
+	// Mark request as rejected (changes are NOT applied)
+	_, err = h.updateRequestRepo.Reject(
+		sctx.Ctx,
+		req.ApprovalRequestID,
+		req.RejectedBy,
+		req.Comments,
+	)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error rejecting request: %v", err)
+		return nil, err
+	}
+
+	log.Info(sctx.Ctx, "Profile update rejected for agent: %s", updateRequest.AgentID)
 
 	return &resp.ApprovalResponse{
 		StatusCodeAndMessage: port.RejectionSuccess,
 		ApprovalRequestID:    req.ApprovalRequestID,
-		Status:               "REJECTED",
-		AgentID:              "placeholder-agent-id",
+		Status:               domain.UpdateRequestStatusRejected,
+		AgentID:              updateRequest.AgentID,
 		RejectedBy:           req.RejectedBy,
 		ProcessedAt:          time.Now(),
 		Message:              "Profile update rejected",

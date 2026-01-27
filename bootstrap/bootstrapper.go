@@ -27,7 +27,8 @@ var FxRepo = fx.Module(
 		repo.NewAgentBankDetailsRepository,
 		repo.NewAgentLicenseRepository,
 		repo.NewAgentAuditLogRepository,
-		repo.NewAgentProfileSessionRepository, // Phase 5: Session management
+		repo.NewAgentProfileSessionRepository,       // Phase 5: Session management
+		repo.NewAgentProfileUpdateRequestRepository, // Phase 6.1: Approval workflow
 		// Add more repository constructors here as needed
 	),
 )
