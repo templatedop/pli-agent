@@ -32,6 +32,8 @@ var FxRepo = fx.Module(
 		repo.NewAgentProfileFieldMetadataRepository, // Phase 6.2: Dynamic field metadata
 		repo.NewAgentTerminationRepository,          // Phase 8: Status management
 		repo.NewAgentNotificationRepository,         // Phase 9: Notification history
+		repo.NewAgentExportRepository,               // Phase 10: Export operations
+		repo.NewHRMSWebhookRepository,               // Phase 10: HRMS webhook events
 		// Add more repository constructors here as needed
 	),
 )
@@ -95,7 +97,13 @@ var FxHandler = fx.Module(
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// TODO: PHASE 10 - Add batch and webhook handlers
+		// PHASE 10: Batch & Webhook APIs (AGT-064 to AGT-067, AGT-078)
+		// Agent Batch & Webhook Handler with export operations and HRMS integration
+		fx.Annotate(
+			handler.NewAgentBatchWebhookHandler,
+			fx.As(new(serverHandler.Handler)),
+			fx.ResultTags(serverHandler.ServerControllersGroupTag),
+		),
 	),
 )
 

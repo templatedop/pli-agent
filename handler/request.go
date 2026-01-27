@@ -211,3 +211,47 @@ type GetNotificationsRequest struct {
 	Page             *int       `query:"page"`
 	Limit            *int       `query:"limit"`
 }
+
+// ========================================================================
+// PHASE 10: BATCH & WEBHOOK API REQUESTS
+// ========================================================================
+
+// ConfigureExportRequest configures export parameters
+// AGT-064: Configure Export Parameters
+// FR-AGT-PRF-025: Profile Export
+type ConfigureExportRequest struct {
+	ExportName   string      `json:"export_name" validate:"required,min=3,max=255"`
+	Filters      interface{} `json:"filters" validate:"required"`      // ExportFilters struct
+	Fields       []string    `json:"fields" validate:"required,min=1"` // Fields to export
+	OutputFormat string      `json:"output_format" validate:"required,oneof=EXCEL PDF CSV"`
+	CreatedBy    string      `json:"created_by" validate:"required"`
+}
+
+// ExecuteExportRequest executes export asynchronously
+// AGT-065: Execute Export Asynchronously
+type ExecuteExportRequest struct {
+	ExportConfigID string `json:"export_config_id" validate:"required,uuid4"`
+	RequestedBy    string `json:"requested_by" validate:"required"`
+}
+
+// HRMSWebhookRequest receives HRMS employee updates
+// AGT-078: HRMS Webhook Receiver
+// INT-AGT-001: HRMS System Integration
+type HRMSWebhookRequest struct {
+	EventID      string               `json:"event_id" validate:"required,uuid4"`
+	EventType    string               `json:"event_type" validate:"required,oneof=EMPLOYEE_CREATED EMPLOYEE_UPDATED EMPLOYEE_TRANSFERRED EMPLOYEE_TERMINATED"`
+	Timestamp    time.Time            `json:"timestamp" validate:"required"`
+	Signature    string               `json:"signature" validate:"required"`
+	EmployeeData HRMSEmployeeDataReq  `json:"employee_data" validate:"required"`
+}
+
+// HRMSEmployeeDataReq represents employee data in webhook
+type HRMSEmployeeDataReq struct {
+	EmployeeID   string `json:"employee_id" validate:"required"`
+	Name         string `json:"name" validate:"required"`
+	Designation  string `json:"designation"`
+	OfficeCode   string `json:"office_code"`
+	Status       string `json:"status"`
+	EmailAddress string `json:"email_address,omitempty"`
+	PhoneNumber  string `json:"phone_number,omitempty"`
+}
