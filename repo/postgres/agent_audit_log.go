@@ -463,27 +463,36 @@ func (r *AgentAuditLogRepository) GetHistory(
 		baseQuery = baseQuery.Where(sq.LtOrEq{"performed_at": *toDate})
 	}
 
-	// Get total count
+	// Use batch for single database round trip
+	batch := &pgx.Batch{}
+
+	// Query 1: Count total records
 	countQuery := baseQuery
 	countSQL, countArgs, _ := countQuery.ToSql()
 	countSQL = "SELECT COUNT(*) FROM (" + countSQL + ") AS subquery"
 
 	var totalCount int
-	err := r.db.QueryRow(cCtx, countSQL, countArgs...).Scan(&totalCount)
+	err := dblib.QueueReturnRowRaw(batch, countSQL, countArgs, pgx.RowTo[int], &totalCount)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get total count: %w", err)
+		return nil, 0, fmt.Errorf("failed to queue count query: %w", err)
 	}
 
-	// Get paginated results
+	// Query 2: Get paginated data
 	dataQuery := baseQuery.
 		OrderBy("performed_at DESC").
 		Limit(uint64(limit)).
 		Offset(uint64(offset))
 
 	var auditLogs []domain.AgentAuditLog
-	err = dblib.SelectRows(cCtx, r.db, dataQuery, pgx.RowToStructByNameLax[domain.AgentAuditLog], &auditLogs)
+	err = dblib.QueueReturn(batch, dataQuery, pgx.RowToStructByNameLax[domain.AgentAuditLog], &auditLogs)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get audit history: %w", err)
+		return nil, 0, fmt.Errorf("failed to queue data query: %w", err)
+	}
+
+	// Execute batch in single round trip
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to execute audit history batch: %w", err)
 	}
 
 	return auditLogs, totalCount, nil

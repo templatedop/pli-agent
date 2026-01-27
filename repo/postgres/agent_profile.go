@@ -676,18 +676,21 @@ func (r *AgentProfileRepository) Search(
 		baseQuery = baseQuery.Where(sq.Eq{"p.office_code": *officeCode})
 	}
 
-	// Get total count first
+	// Use batch for single database round trip
+	batch := &pgx.Batch{}
+
+	// Query 1: Count total records
 	countQuery := baseQuery
 	countSQL, countArgs, _ := countQuery.ToSql()
 	countSQL = "SELECT COUNT(DISTINCT p.agent_id) FROM (" + countSQL + ") AS subquery"
 
 	var totalCount int
-	err := r.db.QueryRow(cCtx, countSQL, countArgs...).Scan(&totalCount)
+	err := dblib.QueueReturnRowRaw(batch, countSQL, countArgs, pgx.RowTo[int], &totalCount)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get total count: %w", err)
+		return nil, 0, fmt.Errorf("failed to queue count query: %w", err)
 	}
 
-	// Get paginated results
+	// Query 2: Get paginated data
 	dataQuery := baseQuery.
 		Distinct().
 		OrderBy("p.created_at DESC").
@@ -695,9 +698,15 @@ func (r *AgentProfileRepository) Search(
 		Offset(uint64(offset))
 
 	var profiles []domain.AgentProfile
-	err = dblib.SelectRows(cCtx, r.db, dataQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &profiles)
+	err = dblib.QueueReturn(batch, dataQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &profiles)
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to search profiles: %w", err)
+		return nil, 0, fmt.Errorf("failed to queue data query: %w", err)
+	}
+
+	// Execute batch in single round trip
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to execute search batch: %w", err)
 	}
 
 	return profiles, totalCount, nil
@@ -714,13 +723,24 @@ func (r *AgentProfileRepository) GetProfileWithRelatedEntities(
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
-	// Get profile
-	profile, err := r.FindByID(ctx, agentID)
+	// Use batch for single database round trip
+	batch := &pgx.Batch{}
+
+	// Query 1: Get profile
+	profileQuery := dblib.Psql.Select("*").
+		From(agentProfileTable).
+		Where(sq.And{
+			sq.Eq{"agent_id": agentID},
+			sq.Eq{"deleted_at": nil},
+		})
+
+	var profile domain.AgentProfile
+	err := dblib.QueueReturnRow(batch, profileQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &profile)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, fmt.Errorf("failed to queue profile query: %w", err)
 	}
 
-	// Get addresses
+	// Query 2: Get addresses
 	addressQuery := dblib.Psql.Select("*").
 		From("agent_addresses").
 		Where(sq.And{
@@ -730,12 +750,12 @@ func (r *AgentProfileRepository) GetProfileWithRelatedEntities(
 		OrderBy("is_primary DESC, created_at DESC")
 
 	var addresses []domain.AgentAddress
-	err = dblib.SelectRows(cCtx, r.db, addressQuery, pgx.RowToStructByNameLax[domain.AgentAddress], &addresses)
-	if err != nil && err != pgx.ErrNoRows {
-		return nil, nil, nil, nil, fmt.Errorf("failed to fetch addresses: %w", err)
+	err = dblib.QueueReturn(batch, addressQuery, pgx.RowToStructByNameLax[domain.AgentAddress], &addresses)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to queue addresses query: %w", err)
 	}
 
-	// Get contacts
+	// Query 3: Get contacts
 	contactQuery := dblib.Psql.Select("*").
 		From("agent_contacts").
 		Where(sq.And{
@@ -745,12 +765,12 @@ func (r *AgentProfileRepository) GetProfileWithRelatedEntities(
 		OrderBy("is_primary DESC, created_at DESC")
 
 	var contacts []domain.AgentContact
-	err = dblib.SelectRows(cCtx, r.db, contactQuery, pgx.RowToStructByNameLax[domain.AgentContact], &contacts)
-	if err != nil && err != pgx.ErrNoRows {
-		return nil, nil, nil, nil, fmt.Errorf("failed to fetch contacts: %w", err)
+	err = dblib.QueueReturn(batch, contactQuery, pgx.RowToStructByNameLax[domain.AgentContact], &contacts)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to queue contacts query: %w", err)
 	}
 
-	// Get emails
+	// Query 4: Get emails
 	emailQuery := dblib.Psql.Select("*").
 		From("agent_emails").
 		Where(sq.And{
@@ -760,36 +780,52 @@ func (r *AgentProfileRepository) GetProfileWithRelatedEntities(
 		OrderBy("is_primary DESC, created_at DESC")
 
 	var emails []domain.AgentEmail
-	err = dblib.SelectRows(cCtx, r.db, emailQuery, pgx.RowToStructByNameLax[domain.AgentEmail], &emails)
-	if err != nil && err != pgx.ErrNoRows {
-		return nil, nil, nil, nil, fmt.Errorf("failed to fetch emails: %w", err)
+	err = dblib.QueueReturn(batch, emailQuery, pgx.RowToStructByNameLax[domain.AgentEmail], &emails)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to queue emails query: %w", err)
 	}
 
-	return profile, addresses, contacts, emails, nil
+	// Execute batch in single round trip
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to execute profile batch: %w", err)
+	}
+
+	return &profile, addresses, contacts, emails, nil
 }
 
 // UpdateSectionReturning updates profile section fields and creates audit logs
 // AGT-025: Update Profile Section
 // FR-AGT-PRF-006: Personal Information Update
 // BR-AGT-PRF-005: Name Update with Audit Logging
-// CRITICAL: Returns updated profile after update
+// CRITICAL: Single database round trip using batch with UPDATE + Bulk INSERT audit logs using UNNEST
 func (r *AgentProfileRepository) UpdateSectionReturning(
 	ctx context.Context,
 	agentID string,
 	updates map[string]interface{},
 	updatedBy string,
 ) (*domain.AgentProfile, error) {
-	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
 	defer cancel()
 
-	// Get old values for audit
-	oldProfile, err := r.FindByID(ctx, agentID)
+	batch := &pgx.Batch{}
+
+	// Query 1: Get old profile values for audit
+	oldProfileQuery := dblib.Psql.Select("*").
+		From(agentProfileTable).
+		Where(sq.And{
+			sq.Eq{"agent_id": agentID},
+			sq.Eq{"deleted_at": nil},
+		})
+
+	var oldProfile domain.AgentProfile
+	err := dblib.QueueReturnRow(batch, oldProfileQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &oldProfile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch old profile values: %w", err)
+		return nil, fmt.Errorf("failed to queue old profile query: %w", err)
 	}
 
-	// Build dynamic SET clause
-	updateQuery := dblib.Psql.Update("agent_profiles").
+	// Query 2: Update profile with RETURNING
+	updateQuery := dblib.Psql.Update(agentProfileTable).
 		Set("updated_at", time.Now()).
 		Set("updated_by", updatedBy).
 		Set("version", sq.Expr("version + 1")).
@@ -802,36 +838,75 @@ func (r *AgentProfileRepository) UpdateSectionReturning(
 	for field, value := range updates {
 		updateQuery = updateQuery.Set(field, value)
 	}
-
 	updateQuery = updateQuery.Suffix("RETURNING *")
 
-	// Execute update
-	var result domain.AgentProfile
-	err = dblib.SelectOne(cCtx, r.db, updateQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &result)
+	var updatedProfile domain.AgentProfile
+	err = dblib.QueueReturnRow(batch, updateQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &updatedProfile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to update profile section: %w", err)
+		return nil, fmt.Errorf("failed to queue update query: %w", err)
 	}
 
-	// Create audit logs for changed fields
+	// Execute first two queries
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute update batch: %w", err)
+	}
+
+	// Query 3: Bulk insert audit logs using UNNEST
+	// Prepare arrays for changed fields only
+	var (
+		agentIDs     []string
+		actionTypes  []string
+		fieldNames   []string
+		oldValues    []string
+		newValues    []string
+		performedBys []string
+		performedAts []time.Time
+	)
+
+	now := time.Now()
 	for field, newValue := range updates {
-		oldValue := getFieldValue(oldProfile, field)
+		oldValue := getFieldValue(&oldProfile, field)
 		newValueStr := fmt.Sprintf("%v", newValue)
 		oldValueStr := fmt.Sprintf("%v", oldValue)
 
+		// Only log if value actually changed
 		if oldValueStr != newValueStr {
-			auditQuery := dblib.Psql.Insert("agent_audit_logs").
-				Columns("agent_id", "action_type", "field_name", "old_value", "new_value", "performed_by", "performed_at").
-				Values(agentID, domain.AuditActionUpdate, field, oldValueStr, newValueStr, updatedBy, time.Now())
-
-			_, err = dblib.Exec(cCtx, r.db, auditQuery)
-			if err != nil {
-				// Log error but don't fail the update
-				fmt.Printf("Failed to create audit log for field %s: %v\n", field, err)
-			}
+			agentIDs = append(agentIDs, agentID)
+			actionTypes = append(actionTypes, domain.AuditActionUpdate)
+			fieldNames = append(fieldNames, field)
+			oldValues = append(oldValues, oldValueStr)
+			newValues = append(newValues, newValueStr)
+			performedBys = append(performedBys, updatedBy)
+			performedAts = append(performedAts, now)
 		}
 	}
 
-	return &result, nil
+	// Only insert audit logs if there are changes
+	if len(fieldNames) > 0 {
+		auditSQL := `
+			INSERT INTO agent_audit_logs (
+				agent_id, action_type, field_name, old_value, new_value,
+				performed_by, performed_at
+			)
+			SELECT * FROM UNNEST(
+				$1::text[],
+				$2::text[],
+				$3::text[],
+				$4::text[],
+				$5::text[],
+				$6::text[],
+				$7::timestamptz[]
+			)
+		`
+		_, err = r.db.Exec(cCtx, auditSQL, agentIDs, actionTypes, fieldNames, oldValues, newValues, performedBys, performedAts)
+		if err != nil {
+			// Log error but don't fail the update
+			return &updatedProfile, fmt.Errorf("profile updated but audit log failed: %w", err)
+		}
+	}
+
+	return &updatedProfile, nil
 }
 
 // Helper function to get field value from profile

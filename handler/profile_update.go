@@ -122,23 +122,31 @@ func (h *AgentProfileUpdateHandler) GetAgentProfile(sctx *serverRoute.Context, r
 		return nil, err
 	}
 
-	// Transform to DTO
+	// Build full name handling null middle name
+	fullName := profile.FirstName
+	if profile.MiddleName.Valid && profile.MiddleName.String != "" {
+		fullName += " " + profile.MiddleName.String
+	}
+	fullName += " " + profile.LastName
+
+	// Transform to DTO with proper type conversions
+	dob := profile.DateOfBirth // Convert time.Time to *time.Time
 	profileDTO := resp.AgentProfileDTO{
 		AgentID:     profile.AgentID,
 		ProfileType: profile.AgentType,
-		FullName:    fmt.Sprintf("%s %s %s", profile.FirstName, profile.MiddleName, profile.LastName),
+		FullName:    fullName,
 		PANNumber:   profile.PANNumber,
 		Status:      profile.Status,
 		PersonalInfo: resp.PersonalInfoDTO{
 			FirstName:     profile.FirstName,
-			MiddleName:    profile.MiddleName,
+			MiddleName:    profile.MiddleName.String,
 			LastName:      profile.LastName,
-			DateOfBirth:   profile.DateOfBirth,
+			DateOfBirth:   &dob,
 			Gender:        profile.Gender,
-			AadharNumber:  profile.AadharNumber,
-			MaritalStatus: profile.MaritalStatus,
-			Category:      profile.Category,
-			Title:         profile.Title,
+			AadharNumber:  profile.AadharNumber.String,
+			MaritalStatus: profile.MaritalStatus.String,
+			Category:      profile.Category.String,
+			Title:         profile.Title.String,
 		},
 		Addresses: transformAddresses(addresses),
 		Contacts:  transformContacts(contacts),
