@@ -147,11 +147,15 @@ type ExportFields []string
 // HRMSEmployeeData represents employee data from HRMS webhook
 // Parsed from employee_data JSONB
 type HRMSEmployeeData struct {
-	EmployeeID   string `json:"employee_id"`
-	Name         string `json:"name"`
-	Designation  string `json:"designation"`
-	OfficeCode   string `json:"office_code"`
-	Status       string `json:"status"`
-	EmailAddress string `json:"email_address,omitempty"`
-	PhoneNumber  string `json:"phone_number,omitempty"`
+	EmployeeID      string     `json:"employee_id"`
+	EmployeeName    string     `json:"employee_name"`
+	Name            string     `json:"name,omitempty"` // Alias for EmployeeName
+	Department      string     `json:"department,omitempty"`
+	Designation     string     `json:"designation,omitempty"`
+	OfficeCode      string     `json:"office_code,omitempty"`
+	Status          string     `json:"status,omitempty"`
+	EmailAddress    string     `json:"email_address,omitempty"`
+	PhoneNumber     string     `json:"phone_number,omitempty"`
+	TerminationDate *time.Time `json:"termination_date,omitempty"`
+	TransferDate    *time.Time `json:"transfer_date,omitempty"`
 }

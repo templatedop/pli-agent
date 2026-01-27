@@ -1,0 +1,234 @@
+# GitLab CI/CD Pipeline for PLI Agent Management System
+# Phase 11: Test Automation and Coverage Reporting
+
+stages:
+  - validate
+  - test
+  - build
+  - deploy
+
+variables:
+  GO_VERSION: "1.22"
+  COVERAGE_THRESHOLD: "70"
+
+# Template for Go jobs
+.go-cache:
+  cache:
+    key: "${CI_COMMIT_REF_SLUG}"
+    paths:
+      - .go/pkg/mod/
+      - .go/cache/
+
+# Validate stage
+code-format:
+  stage: validate
+  image: golang:${GO_VERSION}
+  extends: .go-cache
+  script:
+    - echo "Checking code formatting..."
+    - gofmt -l . | tee fmt-output.txt
+    - test ! -s fmt-output.txt
+  allow_failure: false
+
+go-vet:
+  stage: validate
+  image: golang:${GO_VERSION}
+  extends: .go-cache
+  before_script:
+    - go mod download
+  script:
+    - echo "Running go vet..."
+    - go vet ./...
+  allow_failure: false
+
+golangci-lint:
+  stage: validate
+  image: golangci/golangci-lint:latest
+  extends: .go-cache
+  script:
+    - echo "Running golangci-lint..."
+    - golangci-lint run --timeout 5m
+  allow_failure: true
+
+# Test stage
+unit-tests:
+  stage: test
+  image: golang:${GO_VERSION}
+  extends: .go-cache
+  before_script:
+    - go mod download
+  script:
+    - echo "Running unit tests..."
+    - go test ./... -v -short -coverprofile=coverage.out -covermode=atomic
+    - go tool cover -func=coverage.out | tee coverage.txt
+    - go tool cover -html=coverage.out -o coverage.html
+  after_script:
+    - |
+      # Extract total coverage percentage
+      coverage=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+      echo "Total Coverage: ${coverage}%"
+      echo "Coverage Threshold: ${COVERAGE_THRESHOLD}%"
+      if [ -n "$coverage" ]; then
+        if (( $(echo "$coverage < $COVERAGE_THRESHOLD" | bc -l) )); then
+          echo "WARNING: Coverage ${coverage}% is below threshold ${COVERAGE_THRESHOLD}%"
+        else
+          echo "SUCCESS: Coverage ${coverage}% meets threshold ${COVERAGE_THRESHOLD}%"
+        fi
+      fi
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.out
+    paths:
+      - coverage.out
+      - coverage.txt
+      - coverage.html
+    expire_in: 30 days
+
+race-detection:
+  stage: test
+  image: golang:${GO_VERSION}
+  extends: .go-cache
+  before_script:
+    - go mod download
+  script:
+    - echo "Running tests with race detection..."
+    - go test ./... -race -short
+  allow_failure: false
+
+benchmark-tests:
+  stage: test
+  image: golang:${GO_VERSION}
+  extends: .go-cache
+  before_script:
+    - go mod download
+  script:
+    - echo "Running benchmark tests..."
+    - go test ./... -bench=. -benchmem -run=^$ | tee benchmark-results.txt
+  artifacts:
+    paths:
+      - benchmark-results.txt
+    expire_in: 7 days
+  allow_failure: true
+  only:
+    - main
+    - develop
+
+security-scan:
+  stage: test
+  image: golang:${GO_VERSION}
+  extends: .go-cache
+  before_script:
+    - go install github.com/securego/gosec/v2/cmd/gosec@latest
+  script:
+    - echo "Running security scan..."
+    - gosec -fmt json -out gosec-report.json ./...
+  artifacts:
+    paths:
+      - gosec-report.json
+    expire_in: 30 days
+  allow_failure: true
+
+dependency-check:
+  stage: test
+  image: golang:${GO_VERSION}
+  extends: .go-cache
+  before_script:
+    - go mod download
+  script:
+    - echo "Checking for known vulnerabilities..."
+    - go list -json -deps ./... | nancy sleuth
+  allow_failure: true
+
+# Build stage
+build-binary:
+  stage: build
+  image: golang:${GO_VERSION}
+  extends: .go-cache
+  needs:
+    - unit-tests
+    - race-detection
+  before_script:
+    - go mod download
+  script:
+    - echo "Building application..."
+    - mkdir -p bin
+    - go build -v -o bin/pli-agent-api ./main.go
+    - chmod +x bin/pli-agent-api
+    - ls -lh bin/
+  artifacts:
+    paths:
+      - bin/pli-agent-api
+    expire_in: 7 days
+
+build-docker:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  needs:
+    - unit-tests
+    - race-detection
+  script:
+    - echo "Building Docker image..."
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - docker build -t $CI_REGISTRY_IMAGE:latest .
+  only:
+    - main
+    - develop
+  tags:
+    - docker
+
+# Deploy stage (placeholder)
+deploy-staging:
+  stage: deploy
+  image: alpine:latest
+  needs:
+    - build-binary
+    - build-docker
+  script:
+    - echo "Deploying to staging environment..."
+    - echo "Deployment scripts would go here"
+  environment:
+    name: staging
+    url: https://staging.pli-agent.example.com
+  only:
+    - develop
+  when: manual
+
+deploy-production:
+  stage: deploy
+  image: alpine:latest
+  needs:
+    - build-binary
+    - build-docker
+  script:
+    - echo "Deploying to production environment..."
+    - echo "Deployment scripts would go here"
+  environment:
+    name: production
+    url: https://pli-agent.example.com
+  only:
+    - main
+  when: manual
+
+# Scheduled jobs
+code-quality-report:
+  stage: test
+  image: golang:${GO_VERSION}
+  extends: .go-cache
+  script:
+    - echo "Generating code quality report..."
+    - go install golang.org/x/tools/cmd/goimports@latest
+    - go install honnef.co/go/tools/cmd/staticcheck@latest
+    - goimports -l . | tee imports-report.txt
+    - staticcheck ./... | tee staticcheck-report.txt
+  artifacts:
+    paths:
+      - imports-report.txt
+      - staticcheck-report.txt
+    expire_in: 30 days
+  only:
+    - schedules
