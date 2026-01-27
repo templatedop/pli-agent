@@ -176,20 +176,22 @@ func (r *AgentLicenseRepository) FindByLicenseNumber(ctx context.Context, licens
 	return &license, nil
 }
 
-// Update updates an agent license
+// Update updates an agent license and returns the updated license
 // FR-AGT-PRF-014: License Management
 // BR-AGT-PRF-012: License Renewal Period Rules
-func (r *AgentLicenseRepository) Update(ctx context.Context, licenseID string, updates map[string]interface{}, updatedBy string) error {
+// OPTIMIZED: Returns updated license using RETURNING to eliminate extra SELECT
+func (r *AgentLicenseRepository) Update(ctx context.Context, licenseID string, updates map[string]interface{}, updatedBy string) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
 	// Use CTE to combine UPDATE + INSERT audit logs in single query
 	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	// BR-AGT-PRF-005: Audit Logging
+	// RETURNING clause eliminates need for separate SELECT after update
 	batch := &pgx.Batch{}
 
 	// Build SET clause dynamically
-	setClauses := "updated_at = $2, updated_by = $3"
+	setClauses := "updated_at = $2, updated_by = $3, version = version + 1"
 	args := []interface{}{licenseID, time.Now(), updatedBy}
 	argIndex := 4
 
@@ -212,47 +214,60 @@ func (r *AgentLicenseRepository) Update(ctx context.Context, licenseID string, u
 			UPDATE agent_licenses
 			SET %s
 			WHERE license_id = $1 AND deleted_at IS NULL
-			RETURNING agent_id
+			RETURNING *
+		),
+		audit_insert AS (
+			INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, performed_by, performed_at)
+			SELECT agent_id, $%d, unnest($%d::text[]), unnest($%d::text[]), $%d, $%d
+			FROM updated
 		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, performed_by, performed_at)
-		SELECT agent_id, $%d, unnest($%d::text[]), unnest($%d::text[]), $%d, $%d
-		FROM updated
+		SELECT * FROM updated
 	`, setClauses, argIndex, argIndex+1, argIndex+2, argIndex+3, argIndex+4)
 
 	args = append(args, domain.AuditActionLicenseUpdate, fieldNames, newValues, updatedBy, time.Now())
 
-	err := dbutil.QueueExecRowRaw(batch, sql, args...)
+	var updatedLicense domain.AgentLicense
+	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentLicense], &updatedLicense)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Execute batch
-	return r.db.SendBatch(cCtx, batch).Close()
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, err
+	}
+
+	return &updatedLicense, nil
 }
 
-// RenewLicense renews a license and updates renewal count
+// RenewLicense renews a license and returns the renewed license
 // BR-AGT-PRF-012: License Renewal Period Rules
 // Provisional: Max 2 renewals, 1 year each
 // Permanent: Renewable every 1 year after 5-year validity
-func (r *AgentLicenseRepository) RenewLicense(ctx context.Context, licenseID, updatedBy string, newRenewalDate time.Time) error {
+// OPTIMIZED: Returns renewed license using RETURNING to eliminate extra SELECT
+func (r *AgentLicenseRepository) RenewLicense(ctx context.Context, licenseID, updatedBy string, newRenewalDate time.Time) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
 	// Use CTE to combine UPDATE + INSERT audit in single query
 	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
+	// RETURNING clause eliminates need for separate SELECT after renewal
 	batch := &pgx.Batch{}
 
 	sql := `
 		WITH updated AS (
 			UPDATE agent_licenses
 			SET renewal_count = renewal_count + 1, renewal_date = $2, license_status = $3,
-				updated_at = $4, updated_by = $5
+				updated_at = $4, updated_by = $5, version = version + 1
 			WHERE license_id = $1 AND deleted_at IS NULL
-			RETURNING agent_id
+			RETURNING *
+		),
+		audit_insert AS (
+			INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+			SELECT agent_id, $6, $7, $8, $9, $10, $11
+			FROM updated
 		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
-		SELECT agent_id, $6, $7, $8, $9, $10, $11
-		FROM updated
+		SELECT * FROM updated
 	`
 
 	args := []interface{}{
@@ -260,25 +275,32 @@ func (r *AgentLicenseRepository) RenewLicense(ctx context.Context, licenseID, up
 		domain.AuditActionLicenseUpdate, "renewal_date", newRenewalDate, "License renewed", updatedBy, time.Now(),
 	}
 
-	err := dbutil.QueueExecRowRaw(batch, sql, args...)
+	var renewedLicense domain.AgentLicense
+	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentLicense], &renewedLicense)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Execute batch
-	return r.db.SendBatch(cCtx, batch).Close()
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, err
+	}
+
+	return &renewedLicense, nil
 }
 
-// ConvertToPermanent converts a provisional license to permanent after passing licentiate exam
+// ConvertToPermanent converts a provisional license to permanent and returns the converted license
 // BR-AGT-PRF-012: License Renewal Period Rules
 // After passing exam within 3 years: Permanent license with 5-year validity, renewable every 1 year
-func (r *AgentLicenseRepository) ConvertToPermanent(ctx context.Context, licenseID, updatedBy string, examDate time.Time, certificateNumber string) error {
+// OPTIMIZED: Returns converted license using RETURNING to eliminate extra SELECT
+func (r *AgentLicenseRepository) ConvertToPermanent(ctx context.Context, licenseID, updatedBy string, examDate time.Time, certificateNumber string) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
 
 	// Use CTE to combine UPDATE + INSERT audit in single query
 	// CRITICAL: Golang variables cannot be passed between batch queries - must combine at SQL level
 	// Calculate new renewal date: 5 years from conversion, then renewable every 1 year
+	// RETURNING clause eliminates need for separate SELECT after conversion
 	batch := &pgx.Batch{}
 
 	permanentValidityDate := examDate.AddDate(5, 0, 0)
@@ -288,13 +310,16 @@ func (r *AgentLicenseRepository) ConvertToPermanent(ctx context.Context, license
 			UPDATE agent_licenses
 			SET license_type = $2, licentiate_exam_passed = $3, licentiate_exam_date = $4,
 				licentiate_certificate_number = $5, renewal_date = $6, license_status = $7,
-				updated_at = $8, updated_by = $9
+				updated_at = $8, updated_by = $9, version = version + 1
 			WHERE license_id = $1 AND deleted_at IS NULL
-			RETURNING agent_id
+			RETURNING *
+		),
+		audit_insert AS (
+			INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
+			SELECT agent_id, $10, $11, $12, $13, $14, $15
+			FROM updated
 		)
-		INSERT INTO agent_audit_logs (agent_id, action_type, field_name, new_value, action_reason, performed_by, performed_at)
-		SELECT agent_id, $10, $11, $12, $13, $14, $15
-		FROM updated
+		SELECT * FROM updated
 	`
 
 	args := []interface{}{
@@ -304,13 +329,18 @@ func (r *AgentLicenseRepository) ConvertToPermanent(ctx context.Context, license
 		"Converted to permanent after passing licentiate exam", updatedBy, time.Now(),
 	}
 
-	err := dbutil.QueueExecRowRaw(batch, sql, args...)
+	var convertedLicense domain.AgentLicense
+	err := dbutil.QueueReturnRowRaw(batch, sql, args, pgx.RowToStructByNameLax[domain.AgentLicense], &convertedLicense)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Execute batch
-	return r.db.SendBatch(cCtx, batch).Close()
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, err
+	}
+
+	return &convertedLicense, nil
 }
 
 // FindExpiringLicenses retrieves licenses expiring within specified days
@@ -330,6 +360,55 @@ func (r *AgentLicenseRepository) FindExpiringLicenses(ctx context.Context, daysU
 
 	var licenses []domain.AgentLicense
 	err := dblib.SelectRows(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentLicense], &licenses)
+	if err != nil {
+		return nil, err
+	}
+
+	return licenses, nil
+}
+
+// FindExpiringLicensesWithAgentDetails retrieves licenses expiring within specified days WITH agent profile data
+// AGT-036: Get Expiring Licenses - Optimized with JOIN to eliminate N+1 query problem
+// BR-AGT-PRF-014: License Renewal Reminder Schedule
+// SINGLE database hit: JOINs agent_licenses with agent_profiles
+func (r *AgentLicenseRepository) FindExpiringLicensesWithAgentDetails(ctx context.Context, daysUntilExpiry int) ([]domain.AgentLicenseWithProfile, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
+	defer cancel()
+
+	// Calculate date range for expiry check
+	now := time.Now()
+	futureDate := now.AddDate(0, 0, daysUntilExpiry)
+
+	// JOIN agent_licenses with agent_profiles to get all data in single query
+	// Eliminates N+1 query problem (1 query instead of 1 + N queries)
+	query := dblib.Psql.
+		Select(
+			"al.license_id",
+			"al.agent_id",
+			"al.license_line",
+			"al.license_type",
+			"al.license_number",
+			"al.license_date",
+			"al.renewal_date",
+			"al.renewal_count",
+			"al.license_status",
+			"ap.agent_code",
+			"ap.first_name",
+			"ap.middle_name",
+			"ap.last_name",
+			"ap.office_code",
+		).
+		From("agent_licenses al").
+		Join("agent_profiles ap ON al.agent_id = ap.agent_id").
+		Where(sq.Eq{"al.license_status": domain.LicenseStatusActive}).
+		Where(sq.Eq{"al.deleted_at": nil}).
+		Where(sq.Eq{"ap.deleted_at": nil}).
+		Where(sq.LtOrEq{"al.renewal_date": futureDate}).
+		Where(sq.GtOrEq{"al.renewal_date": now}).
+		OrderBy("al.renewal_date ASC")
+
+	var licenses []domain.AgentLicenseWithProfile
+	err := dblib.SelectRows(cCtx, r.db, query, pgx.RowToStructByNameLax[domain.AgentLicenseWithProfile], &licenses)
 	if err != nil {
 		return nil, err
 	}

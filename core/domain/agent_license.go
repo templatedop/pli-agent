@@ -97,3 +97,26 @@ func (l *AgentLicense) IsExpired() bool {
 func (l *AgentLicense) GetDaysUntilRenewal() int {
 	return int(time.Until(l.RenewalDate).Hours() / 24)
 }
+
+// AgentLicenseWithProfile combines license and basic agent profile info
+// Used for optimized queries that need both license and profile data in single SELECT
+// Eliminates N+1 query problem when fetching expiring licenses with agent details
+type AgentLicenseWithProfile struct {
+	// License fields
+	LicenseID     string    `json:"license_id" db:"license_id"`
+	AgentID       string    `json:"agent_id" db:"agent_id"`
+	LicenseLine   string    `json:"license_line" db:"license_line"`
+	LicenseType   string    `json:"license_type" db:"license_type"`
+	LicenseNumber string    `json:"license_number" db:"license_number"`
+	LicenseDate   time.Time `json:"license_date" db:"license_date"`
+	RenewalDate   time.Time `json:"renewal_date" db:"renewal_date"`
+	RenewalCount  int       `json:"renewal_count" db:"renewal_count"`
+	LicenseStatus string    `json:"license_status" db:"license_status"`
+
+	// Agent profile fields (from JOIN)
+	AgentCode  string `json:"agent_code" db:"agent_code"`
+	FirstName  string `json:"first_name" db:"first_name"`
+	MiddleName string `json:"middle_name" db:"middle_name"`
+	LastName   string `json:"last_name" db:"last_name"`
+	OfficeCode string `json:"office_code" db:"office_code"`
+}

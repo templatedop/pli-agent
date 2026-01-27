@@ -303,17 +303,11 @@ func (h *AgentLicenseHandler) UpdateLicense(sctx *serverRoute.Context, uri Agent
 		return nil, fmt.Errorf("no fields to update")
 	}
 
-	// Update license (repository handles audit logging via CTE)
-	err = h.licenseRepo.Update(sctx.Ctx, uri.LicenseID, updates, request.UpdatedBy)
+	// Update license and get updated license in SINGLE database hit
+	// Repository uses RETURNING clause to eliminate extra SELECT
+	updatedLicense, err := h.licenseRepo.Update(sctx.Ctx, uri.LicenseID, updates, request.UpdatedBy)
 	if err != nil {
 		log.Error(sctx.Ctx, "Error updating license: %v", err)
-		return nil, err
-	}
-
-	// Fetch updated license
-	updatedLicense, err := h.licenseRepo.FindByID(sctx.Ctx, uri.LicenseID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error fetching updated license: %v", err)
 		return nil, err
 	}
 
@@ -351,6 +345,7 @@ func (h *AgentLicenseHandler) RenewLicense(sctx *serverRoute.Context, uri AgentL
 	}
 
 	previousExpiry := license.RenewalDate
+	var renewedLicense *domain.AgentLicense
 	var newRenewalDate time.Time
 	var renewalMessage string
 
@@ -367,8 +362,8 @@ func (h *AgentLicenseHandler) RenewLicense(sctx *serverRoute.Context, uri AgentL
 		newRenewalDate = time.Now().AddDate(1, 0, 0)
 		renewalMessage = fmt.Sprintf("Provisional license renewed for 1 year (renewal %d/2)", license.RenewalCount+1)
 
-		// Use repository method for renewal
-		err = h.licenseRepo.RenewLicense(sctx.Ctx, uri.LicenseID, request.UpdatedBy, newRenewalDate)
+		// Repository returns renewed license using RETURNING (single database hit)
+		renewedLicense, err = h.licenseRepo.RenewLicense(sctx.Ctx, uri.LicenseID, request.UpdatedBy, newRenewalDate)
 
 	case "CONVERT_TO_PERMANENT":
 		// Convert provisional to permanent after passing exam
@@ -387,8 +382,8 @@ func (h *AgentLicenseHandler) RenewLicense(sctx *serverRoute.Context, uri AgentL
 		newRenewalDate = request.ExamDate.AddDate(5, 0, 0)
 		renewalMessage = "License converted to permanent after passing exam. Valid for 5 years, renewable annually."
 
-		// Use repository method for conversion
-		err = h.licenseRepo.ConvertToPermanent(sctx.Ctx, uri.LicenseID, request.UpdatedBy, *request.ExamDate, *request.ExamCertificateNumber)
+		// Repository returns converted license using RETURNING (single database hit)
+		renewedLicense, err = h.licenseRepo.ConvertToPermanent(sctx.Ctx, uri.LicenseID, request.UpdatedBy, *request.ExamDate, *request.ExamCertificateNumber)
 
 	case "PERMANENT_RENEWAL":
 		// Permanent license: Annual renewal required
@@ -398,8 +393,8 @@ func (h *AgentLicenseHandler) RenewLicense(sctx *serverRoute.Context, uri AgentL
 		newRenewalDate = time.Now().AddDate(1, 0, 0)
 		renewalMessage = "Permanent license renewed for 1 year"
 
-		// Use repository method for renewal
-		err = h.licenseRepo.RenewLicense(sctx.Ctx, uri.LicenseID, request.UpdatedBy, newRenewalDate)
+		// Repository returns renewed license using RETURNING (single database hit)
+		renewedLicense, err = h.licenseRepo.RenewLicense(sctx.Ctx, uri.LicenseID, request.UpdatedBy, newRenewalDate)
 
 	default:
 		return nil, fmt.Errorf("invalid renewal type: %s", request.RenewalType)
@@ -407,13 +402,6 @@ func (h *AgentLicenseHandler) RenewLicense(sctx *serverRoute.Context, uri AgentL
 
 	if err != nil {
 		log.Error(sctx.Ctx, "Error renewing license: %v", err)
-		return nil, err
-	}
-
-	// Fetch renewed license
-	renewedLicense, err := h.licenseRepo.FindByID(sctx.Ctx, uri.LicenseID)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error fetching renewed license: %v", err)
 		return nil, err
 	}
 
@@ -492,6 +480,7 @@ func (h *AgentLicenseHandler) GetLicenseTypes(sctx *serverRoute.Context) (*resp.
 // GetExpiringLicenses retrieves licenses expiring within specified days
 // AGT-036: Get Expiring Licenses
 // BR-AGT-PRF-014: License Renewal Reminder Schedule
+// OPTIMIZED: Single database hit with JOIN (no N+1 query problem)
 func (h *AgentLicenseHandler) GetExpiringLicenses(sctx *serverRoute.Context, query req.GetExpiringLicensesQuery) (*resp.ExpiringLicensesResponse, error) {
 	log.Info(sctx.Ctx, "Fetching licenses expiring within %d days", query.Days)
 
@@ -506,41 +495,34 @@ func (h *AgentLicenseHandler) GetExpiringLicenses(sctx *serverRoute.Context, que
 		query.Limit = 50
 	}
 
-	// Fetch expiring licenses
-	licenses, err := h.licenseRepo.FindExpiringLicenses(sctx.Ctx, query.Days)
+	// Fetch expiring licenses WITH agent details in SINGLE database hit
+	// Uses JOIN to eliminate N+1 query problem
+	licensesWithProfiles, err := h.licenseRepo.FindExpiringLicensesWithAgentDetails(sctx.Ctx, query.Days)
 	if err != nil {
 		log.Error(sctx.Ctx, "Error fetching expiring licenses: %v", err)
 		return nil, err
 	}
 
-	// Convert to DTOs with agent details
-	// TODO: Optimize by joining with agent_profiles in repository
-	expiringDTOs := make([]resp.ExpiringLicenseDTO, 0)
-	for _, license := range licenses {
-		// Fetch agent profile for details
-		profile, err := h.profileRepo.FindByID(sctx.Ctx, license.AgentID)
-		if err != nil {
-			log.Warn(sctx.Ctx, "Could not fetch profile for agent %s: %v", license.AgentID, err)
-			continue
-		}
-
-		daysRemaining := int(time.Until(license.RenewalDate).Hours() / 24)
+	// Convert to DTOs (no additional database calls needed!)
+	expiringDTOs := make([]resp.ExpiringLicenseDTO, 0, len(licensesWithProfiles))
+	for _, lp := range licensesWithProfiles {
+		daysRemaining := int(time.Until(lp.RenewalDate).Hours() / 24)
 
 		expiringDTOs = append(expiringDTOs, resp.ExpiringLicenseDTO{
-			LicenseID:     license.LicenseID,
-			AgentID:       license.AgentID,
-			AgentCode:     profile.AgentCode,
-			AgentName:     fmt.Sprintf("%s %s %s", profile.FirstName, profile.MiddleName, profile.LastName),
-			LicenseLine:   license.LicenseLine,
-			LicenseType:   license.LicenseType,
-			LicenseNumber: license.LicenseNumber,
-			RenewalDate:   license.RenewalDate,
+			LicenseID:     lp.LicenseID,
+			AgentID:       lp.AgentID,
+			AgentCode:     lp.AgentCode,
+			AgentName:     fmt.Sprintf("%s %s %s", lp.FirstName, lp.MiddleName, lp.LastName),
+			LicenseLine:   lp.LicenseLine,
+			LicenseType:   lp.LicenseType,
+			LicenseNumber: lp.LicenseNumber,
+			RenewalDate:   lp.RenewalDate,
 			DaysRemaining: daysRemaining,
-			RenewalCount:  license.RenewalCount,
-			OfficeCode:    profile.OfficeCode,
-			OfficeName:    profile.OfficeCode, // TODO: Fetch actual office name
-			ContactMobile: "",                 // TODO: Fetch from contact table
-			ContactEmail:  "",                 // TODO: Fetch from email table
+			RenewalCount:  lp.RenewalCount,
+			OfficeCode:    lp.OfficeCode,
+			OfficeName:    lp.OfficeCode, // TODO: Fetch actual office name from office table
+			ContactMobile: "",            // TODO: Add to JOIN if contact info in same table
+			ContactEmail:  "",            // TODO: Add to JOIN if email info in same table
 		})
 	}
 
