@@ -34,8 +34,13 @@ func NewAgentLicenseRepository(db *dblib.DB, cfg *config.Config) *AgentLicenseRe
 
 // Create adds a new license with automatic renewal date calculation
 // AGT-030: Add License
+// FR-AGT-PRF-010: License Management Interface
 // BR-AGT-PRF-012: License Renewal Period Rules
-// CRITICAL: Single database round trip
+// BR-AGT-PRF-030: License Date Tracking
+// VR-AGT-PRF-031: License Type Mandatory
+// VR-AGT-PRF-032: Resident Status Mandatory
+// VR-AGT-PRF-036: Authority Date Validation
+// CRITICAL: Single database round trip with automatic renewal date calculation
 func (r *AgentLicenseRepository) Create(ctx context.Context, license domain.AgentLicense) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
@@ -71,6 +76,7 @@ func (r *AgentLicenseRepository) Create(ctx context.Context, license domain.Agen
 
 // FindByID retrieves a specific license by ID
 // AGT-031: Get License Details
+// FR-AGT-PRF-010: License Management Interface
 func (r *AgentLicenseRepository) FindByID(ctx context.Context, licenseID string) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
@@ -96,6 +102,9 @@ func (r *AgentLicenseRepository) FindByID(ctx context.Context, licenseID string)
 
 // FindByAgentID retrieves all licenses for an agent
 // AGT-029: Get Agent Licenses
+// FR-AGT-PRF-010: License Management Interface
+// BR-AGT-PRF-012: License Renewal Period Rules
+// BR-AGT-PRF-014: License Renewal Reminders
 // CRITICAL: Single database round trip with optional status filter
 func (r *AgentLicenseRepository) FindByAgentID(ctx context.Context, agentID string, status *string) ([]domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
@@ -125,6 +134,10 @@ func (r *AgentLicenseRepository) FindByAgentID(ctx context.Context, agentID stri
 
 // Update updates license details
 // AGT-032: Update License
+// FR-AGT-PRF-010: License Management Interface
+// VR-AGT-PRF-032: Resident Status Mandatory
+// VR-AGT-PRF-036: Authority Date Validation
+// CRITICAL: UPDATE...RETURNING for atomic operation with version control
 func (r *AgentLicenseRepository) Update(ctx context.Context, licenseID string, updates map[string]interface{}, updatedBy string) (*domain.AgentLicense, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
@@ -159,8 +172,11 @@ func (r *AgentLicenseRepository) Update(ctx context.Context, licenseID string, u
 
 // Renew renews a license with period calculation
 // AGT-033: Renew License
-// BR-AGT-PRF-012: Complex renewal rules
-// CRITICAL: Single database round trip with RETURNING
+// FR-AGT-PRF-011: License Renewal Automation
+// BR-AGT-PRF-012: License Renewal Period Rules (Complex)
+// WF-AGT-PRF-003: License Renewal Workflow
+// CRITICAL: Single database round trip with UPDATE...RETURNING
+// Complex Logic: Validates max 2 provisional renewals, converts to permanent after exam
 func (r *AgentLicenseRepository) Renew(
 	ctx context.Context,
 	licenseID string,
@@ -239,6 +255,8 @@ func (r *AgentLicenseRepository) Renew(
 
 // Delete soft deletes a license
 // AGT-034: Delete License
+// FR-AGT-PRF-010: License Management Interface
+// CRITICAL: Soft delete with audit tracking
 func (r *AgentLicenseRepository) Delete(ctx context.Context, licenseID, deletedBy string) error {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
@@ -265,8 +283,9 @@ func (r *AgentLicenseRepository) Delete(ctx context.Context, licenseID, deletedB
 
 // FindExpiring retrieves licenses expiring within specified days
 // AGT-036: Get Expiring Licenses
+// FR-AGT-PRF-011: License Renewal Automation
 // BR-AGT-PRF-014: License Renewal Reminders
-// CRITICAL: Single database round trip with pagination
+// CRITICAL: Single database round trip with batch (count + paginated data)
 func (r *AgentLicenseRepository) FindExpiring(
 	ctx context.Context,
 	days int,
@@ -330,8 +349,10 @@ func (r *AgentLicenseRepository) FindExpiring(
 
 // DeactivateExpiredAgents batch deactivates agents with expired licenses
 // AGT-038: Trigger License Expiry Deactivation
-// BR-AGT-PRF-013: Auto-Deactivation on Expiry
-// CRITICAL: Batch operation for system job
+// FR-AGT-PRF-012: License Auto-Deactivation
+// BR-AGT-PRF-013: Auto-Deactivation on License Expiry
+// WF-AGT-PRF-007: License Deactivation Workflow
+// CRITICAL: Batch operation for system job with dry-run support
 func (r *AgentLicenseRepository) DeactivateExpiredAgents(ctx context.Context, batchDate time.Time, dryRun bool) ([]string, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
 	defer cancel()

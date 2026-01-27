@@ -63,7 +63,9 @@ func (h *LicenseManagementHandler) Routes() []serverRoute.Route {
 
 // GetAgentLicenses retrieves all licenses for an agent
 // AGT-029: Get Agent Licenses
-// FR-AGT-PRF-010: License Management
+// FR-AGT-PRF-010: License Management Interface
+// BR-AGT-PRF-012: License Renewal Period Rules
+// BR-AGT-PRF-014: License Renewal Reminders
 func (h *LicenseManagementHandler) GetAgentLicenses(sctx *serverRoute.Context, uri AgentIDUri, query GetAgentLicensesQuery) (*resp.AgentLicensesResponse, error) {
 	log.Info(sctx.Ctx, "Getting licenses for agent: %s, status filter: %s", uri.AgentID, query.Status)
 
@@ -93,7 +95,15 @@ func (h *LicenseManagementHandler) GetAgentLicenses(sctx *serverRoute.Context, u
 
 // AddLicense adds a new license with automatic renewal date calculation
 // AGT-030: Add License
+// FR-AGT-PRF-010: License Management Interface
+// FR-AGT-PRF-011: License Renewal Automation
 // BR-AGT-PRF-012: License Renewal Period Rules
+// BR-AGT-PRF-014: License Renewal Reminders
+// BR-AGT-PRF-030: License Date Tracking
+// VR-AGT-PRF-031: License Type Mandatory
+// VR-AGT-PRF-032: Resident Status Mandatory
+// VR-AGT-PRF-036: Authority Date Validation
+// WF-AGT-PRF-003: License Renewal Workflow
 func (h *LicenseManagementHandler) AddLicense(sctx *serverRoute.Context, req AddLicenseRequest) (*resp.AddLicenseResponse, error) {
 	log.Info(sctx.Ctx, "Adding license for agent: %s, type: %s", req.AgentID, req.LicenseType)
 
@@ -175,6 +185,9 @@ func (h *LicenseManagementHandler) AddLicense(sctx *serverRoute.Context, req Add
 
 // GetLicenseDetails retrieves complete license details
 // AGT-031: Get License Details
+// FR-AGT-PRF-010: License Management Interface
+// BR-AGT-PRF-014: License Renewal Reminders
+// FR-AGT-PRF-022: Audit History Tracking
 func (h *LicenseManagementHandler) GetLicenseDetails(sctx *serverRoute.Context, uri struct {
 	AgentID   string `uri:"agent_id" validate:"required,uuid4"`
 	LicenseID string `uri:"license_id" validate:"required,uuid4"`
@@ -228,6 +241,10 @@ func (h *LicenseManagementHandler) GetLicenseDetails(sctx *serverRoute.Context, 
 
 // UpdateLicense updates license details
 // AGT-032: Update License
+// FR-AGT-PRF-010: License Management Interface
+// VR-AGT-PRF-032: Resident Status Mandatory
+// VR-AGT-PRF-036: Authority Date Validation
+// FR-AGT-PRF-022: Audit History Tracking
 func (h *LicenseManagementHandler) UpdateLicense(sctx *serverRoute.Context, req UpdateLicenseRequest) (*resp.UpdateLicenseResponse, error) {
 	log.Info(sctx.Ctx, "Updating license: %s for agent: %s", req.LicenseID, req.AgentID)
 
@@ -282,8 +299,11 @@ func (h *LicenseManagementHandler) UpdateLicense(sctx *serverRoute.Context, req 
 
 // RenewLicense renews a license with period calculation
 // AGT-033: Renew License
-// BR-AGT-PRF-012: Complex Renewal Rules
+// FR-AGT-PRF-010: License Management Interface
+// FR-AGT-PRF-011: License Renewal Automation
+// BR-AGT-PRF-012: Complex Renewal Rules (Provisional to Permanent Conversion)
 // WF-AGT-PRF-003: License Renewal Workflow
+// FR-AGT-PRF-022: Audit History Tracking
 func (h *LicenseManagementHandler) RenewLicense(sctx *serverRoute.Context, req RenewLicenseRequest) (*resp.RenewLicenseResponse, error) {
 	log.Info(sctx.Ctx, "Renewing license: %s for agent: %s, type: %s", req.LicenseID, req.AgentID, req.RenewalType)
 
@@ -360,6 +380,8 @@ func (h *LicenseManagementHandler) RenewLicense(sctx *serverRoute.Context, req R
 
 // DeleteLicense soft deletes a license
 // AGT-034: Delete License
+// FR-AGT-PRF-010: License Management Interface
+// FR-AGT-PRF-022: Audit History Tracking
 func (h *LicenseManagementHandler) DeleteLicense(sctx *serverRoute.Context, uri struct {
 	AgentID   string `uri:"agent_id" validate:"required,uuid4"`
 	LicenseID string `uri:"license_id" validate:"required,uuid4"`
@@ -389,6 +411,8 @@ func (h *LicenseManagementHandler) DeleteLicense(sctx *serverRoute.Context, uri 
 
 // GetLicenseTypes returns available license types (lookup)
 // AGT-035: Get License Types
+// FR-AGT-PRF-010: License Management Interface
+// BR-AGT-PRF-012: License Renewal Period Rules
 func (h *LicenseManagementHandler) GetLicenseTypes(sctx *serverRoute.Context) (*resp.LicenseTypesResponse, error) {
 	log.Info(sctx.Ctx, "Getting license types")
 
@@ -413,6 +437,8 @@ func (h *LicenseManagementHandler) GetLicenseTypes(sctx *serverRoute.Context) (*
 
 // GetExpiringLicenses retrieves licenses expiring within specified days
 // AGT-036: Get Expiring Licenses
+// FR-AGT-PRF-011: License Renewal Automation
+// BR-AGT-PRF-012: License Renewal Period Rules
 // BR-AGT-PRF-014: License Renewal Reminders
 func (h *LicenseManagementHandler) GetExpiringLicenses(sctx *serverRoute.Context, query GetExpiringLicensesQuery) (*resp.ExpiringLicensesResponse, error) {
 	log.Info(sctx.Ctx, "Getting expiring licenses within %d days", query.Days)
@@ -478,7 +504,9 @@ func (h *LicenseManagementHandler) GetExpiringLicenses(sctx *serverRoute.Context
 
 // GetLicenseReminders retrieves reminder schedule for a license
 // AGT-037: Get License Reminders
+// FR-AGT-PRF-011: License Renewal Automation
 // BR-AGT-PRF-014: License Renewal Reminders
+// WF-AGT-PRF-003: License Renewal Workflow
 func (h *LicenseManagementHandler) GetLicenseReminders(sctx *serverRoute.Context, uri LicenseIDUri) (*resp.LicenseRemindersResponse, error) {
 	log.Info(sctx.Ctx, "Getting reminders for license: %s", uri.LicenseID)
 
@@ -514,7 +542,8 @@ func (h *LicenseManagementHandler) GetLicenseReminders(sctx *serverRoute.Context
 
 // TriggerExpiryDeactivation batch job to deactivate agents with expired licenses
 // AGT-038: Trigger License Expiry Deactivation
-// BR-AGT-PRF-013: Auto-Deactivation on Expiry
+// FR-AGT-PRF-012: License Auto-Deactivation
+// BR-AGT-PRF-013: Auto-Deactivation on License Expiry
 // WF-AGT-PRF-007: License Deactivation Workflow
 func (h *LicenseManagementHandler) TriggerExpiryDeactivation(sctx *serverRoute.Context, req TriggerExpiryDeactivationRequest) (*resp.ExpiryDeactivationResponse, error) {
 	log.Info(sctx.Ctx, "Triggering expiry deactivation for batch date: %s, dry_run: %v", req.BatchDate, req.DryRun)

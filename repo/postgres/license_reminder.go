@@ -32,8 +32,11 @@ func NewLicenseReminderRepository(db *dblib.DB, cfg *config.Config) *LicenseRemi
 }
 
 // CreateBatch creates multiple reminders for a license
+// AGT-030: Add License (triggers reminder creation)
+// FR-AGT-PRF-011: License Renewal Automation
 // BR-AGT-PRF-014: License Renewal Reminders (30, 15, 7 days, expiry day)
-// CRITICAL: Uses UNNEST pattern for bulk insert in single round trip
+// WF-AGT-PRF-003: License Renewal Workflow
+// CRITICAL: Bulk insert of 4 reminders in single database round trip
 func (r *LicenseReminderRepository) CreateBatch(ctx context.Context, licenseID string, renewalDate time.Time, createdBy string) error {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
@@ -73,6 +76,9 @@ func (r *LicenseReminderRepository) CreateBatch(ctx context.Context, licenseID s
 
 // FindByLicenseID retrieves all reminders for a license
 // AGT-037: Get License Reminders
+// FR-AGT-PRF-011: License Renewal Automation
+// BR-AGT-PRF-014: License Renewal Reminders
+// CRITICAL: Single database round trip with ordered results
 func (r *LicenseReminderRepository) FindByLicenseID(ctx context.Context, licenseID string) ([]domain.LicenseReminder, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
@@ -92,6 +98,10 @@ func (r *LicenseReminderRepository) FindByLicenseID(ctx context.Context, license
 }
 
 // UpdateSentStatus marks a reminder as sent or failed
+// FR-AGT-PRF-011: License Renewal Automation
+// BR-AGT-PRF-014: License Renewal Reminders
+// WF-AGT-PRF-003: License Renewal Workflow
+// CRITICAL: Atomic status update with retry count tracking
 func (r *LicenseReminderRepository) UpdateSentStatus(
 	ctx context.Context,
 	reminderID string,
@@ -128,6 +138,10 @@ func (r *LicenseReminderRepository) UpdateSentStatus(
 
 // FindPendingReminders retrieves pending reminders for today or past due
 // Used by background job to send reminders
+// FR-AGT-PRF-011: License Renewal Automation
+// BR-AGT-PRF-014: License Renewal Reminders
+// WF-AGT-PRF-003: License Renewal Workflow
+// CRITICAL: Batch query for system job processing
 func (r *LicenseReminderRepository) FindPendingReminders(ctx context.Context, upToDate time.Time) ([]domain.LicenseReminder, error) {
 	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
 	defer cancel()
