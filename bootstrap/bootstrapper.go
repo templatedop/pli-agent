@@ -63,7 +63,13 @@ var FxHandler = fx.Module(
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// TODO: PHASE 6 - Add profile update handlers
+		// PHASE 6: Profile Update APIs (AGT-022 to AGT-028)
+		// Agent Profile Update Handler with multi-criteria search and audit history
+		fx.Annotate(
+			handler.NewAgentProfileUpdateHandler,
+			fx.As(new(serverHandler.Handler)),
+			fx.ResultTags(serverHandler.ServerControllersGroupTag),
+		),
 		// TODO: PHASE 7 - Add license management handlers
 		// TODO: PHASE 8 - Add status management handlers
 		// TODO: PHASE 9 - Add search and dashboard handlers

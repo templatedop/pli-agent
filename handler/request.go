@@ -123,3 +123,57 @@ type SubmitProfileRequest struct {
 	SessionID   string `uri:"session_id" validate:"required,uuid4"`
 	SubmittedBy string `json:"submitted_by" validate:"required"`
 }
+
+// ========================================================================
+// PROFILE UPDATE API REQUESTS (AGT-022 to AGT-028)
+// ========================================================================
+
+// SearchAgentsRequest performs multi-criteria agent search
+// AGT-022: Search Agents
+// FR-AGT-PRF-004: Multi-criteria agent search
+// BR-AGT-PRF-022: Multi-Criteria Agent Search
+type SearchAgentsRequest struct {
+	AgentID      *string `query:"agent_id"`
+	Name         *string `query:"name"`
+	PANNumber    *string `query:"pan_number"`
+	MobileNumber *string `query:"mobile_number"`
+	Email        *string `query:"email"`
+	Status       *string `query:"status"`
+	OfficeCode   *string `query:"office_code"`
+	Page         int     `query:"page" validate:"omitempty,min=1" default:"1"`
+	Limit        int     `query:"limit" validate:"omitempty,min=1,max=100" default:"20"`
+}
+
+// UpdateSectionRequest updates a profile section
+// AGT-025: Update Profile Section
+// FR-AGT-PRF-006: Personal Information Update
+// BR-AGT-PRF-005: Name Update with Audit Logging
+type UpdateSectionRequest struct {
+	AgentID   string                 `uri:"agent_id" validate:"required"`
+	Section   string                 `uri:"section" validate:"required,oneof=personal_info address contact email"`
+	Updates   map[string]interface{} `json:"updates" validate:"required"`
+	UpdatedBy string                 `json:"updated_by" validate:"required"`
+	Reason    string                 `json:"reason,omitempty"`
+}
+
+// ApprovalRequest approves or rejects a profile update
+// AGT-026: Approve Profile Update
+// AGT-027: Reject Profile Update
+type ApprovalRequest struct {
+	ApprovalRequestID string `uri:"approval_request_id" validate:"required,uuid4"`
+	Action            string `json:"action" validate:"required,oneof=APPROVE REJECT"`
+	Comments          string `json:"comments" validate:"required,min=10"`
+	ApprovedBy        string `json:"approved_by,omitempty"`
+	RejectedBy        string `json:"rejected_by,omitempty"`
+}
+
+// AuditHistoryRequest retrieves audit history with filters
+// AGT-028: Get Audit History
+// FR-AGT-PRF-022: Profile Change History and Audit Trail
+type AuditHistoryRequest struct {
+	AgentID  string  `uri:"agent_id" validate:"required"`
+	FromDate *string `query:"from_date"`
+	ToDate   *string `query:"to_date"`
+	Page     int     `query:"page" validate:"omitempty,min=1" default:"1"`
+	Limit    int     `query:"limit" validate:"omitempty,min=1,max=100" default:"50"`
+}

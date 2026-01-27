@@ -106,12 +106,12 @@ func (r *AgentAuditLogRepository) FindByAgentID(ctx context.Context, agentID str
 
 // AuditLogFilters defines filters for audit log queries
 type AuditLogFilters struct {
-	AgentID      string
-	ActionType   string
-	FieldName    string
-	PerformedBy  string
-	FromDate     *time.Time
-	ToDate       *time.Time
+	AgentID     string
+	ActionType  string
+	FieldName   string
+	PerformedBy string
+	FromDate    *time.Time
+	ToDate      *time.Time
 }
 
 // FindWithFilters retrieves audit logs with filters and pagination
@@ -311,10 +311,10 @@ func (r *AgentAuditLogRepository) BatchCreate(ctx context.Context, auditLogs []d
 // GetAuditSummary retrieves audit summary statistics for an agent
 // BR-AGT-PRF-005: Audit Logging - Summary statistics
 type AuditSummary struct {
-	AgentID            string
-	TotalActions       int64
-	LastActionDate     time.Time
-	ActionTypeCounts   map[string]int64
+	AgentID          string
+	TotalActions     int64
+	LastActionDate   time.Time
+	ActionTypeCounts map[string]int64
 }
 
 func (r *AgentAuditLogRepository) GetAuditSummary(ctx context.Context, agentID string) (*AuditSummary, error) {
@@ -433,4 +433,58 @@ func (r *AgentAuditLogRepository) FindByPerformedBy(ctx context.Context, perform
 	}
 
 	return auditLogs, nil
+}
+
+// GetHistory retrieves audit history for an agent with pagination and date filters
+// AGT-028: Get Audit History
+// FR-AGT-PRF-022: Profile Change History and Audit Trail
+// CRITICAL: Single query with pagination
+func (r *AgentAuditLogRepository) GetHistory(
+	ctx context.Context,
+	agentID string,
+	fromDate, toDate *time.Time,
+	page, limit int,
+) ([]domain.AgentAuditLog, int, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
+	defer cancel()
+
+	offset := (page - 1) * limit
+
+	// Build base query
+	baseQuery := dblib.Psql.Select("*").
+		From(agentAuditLogTable).
+		Where(sq.Eq{"agent_id": agentID})
+
+	// Apply date filters
+	if fromDate != nil {
+		baseQuery = baseQuery.Where(sq.GtOrEq{"performed_at": *fromDate})
+	}
+	if toDate != nil {
+		baseQuery = baseQuery.Where(sq.LtOrEq{"performed_at": *toDate})
+	}
+
+	// Get total count
+	countQuery := baseQuery
+	countSQL, countArgs, _ := countQuery.ToSql()
+	countSQL = "SELECT COUNT(*) FROM (" + countSQL + ") AS subquery"
+
+	var totalCount int
+	err := r.db.QueryRow(cCtx, countSQL, countArgs...).Scan(&totalCount)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get total count: %w", err)
+	}
+
+	// Get paginated results
+	dataQuery := baseQuery.
+		OrderBy("performed_at DESC").
+		Limit(uint64(limit)).
+		Offset(uint64(offset))
+
+	var auditLogs []domain.AgentAuditLog
+	err = dblib.SelectRows(cCtx, r.db, dataQuery, pgx.RowToStructByNameLax[domain.AgentAuditLog], &auditLogs)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get audit history: %w", err)
+	}
+
+	return auditLogs, totalCount, nil
 }

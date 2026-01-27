@@ -14,15 +14,22 @@ var (
 
 // Agent-specific status messages
 var (
-	ProfileCreateSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "agent profile created successfully", Success: true}
-	ProfileUpdateSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "agent profile updated successfully", Success: true}
-	LicenseCreateSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "license created successfully", Success: true}
-	LicenseRenewSuccess   StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license renewed successfully", Success: true}
-	StatusChangeSuccess   StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "agent status updated successfully", Success: true}
-	ValidationSuccess     StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "validation successful", Success: true}
-	SessionCreateSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "session created successfully", Success: true}
-	OTPSendSuccess        StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "OTP sent successfully", Success: true}
-	OTPVerifySuccess      StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "OTP verified successfully", Success: true}
+	ProfileCreateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "agent profile created successfully", Success: true}
+	ProfileUpdateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "agent profile updated successfully", Success: true}
+	ProfileFetchSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "profile retrieved successfully", Success: true}
+	LicenseCreateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "license created successfully", Success: true}
+	LicenseRenewSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "license renewed successfully", Success: true}
+	StatusChangeSuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "agent status updated successfully", Success: true}
+	ValidationSuccess    StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "validation successful", Success: true}
+	SessionCreateSuccess StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 201, Message: "session created successfully", Success: true}
+	OTPSendSuccess       StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "OTP sent successfully", Success: true}
+	OTPVerifySuccess     StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "OTP verified successfully", Success: true}
+	SearchSuccess        StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "search completed successfully", Success: true}
+	FormFetchSuccess     StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "form data retrieved successfully", Success: true}
+	PendingApproval      StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 202, Message: "update pending approval", Success: true}
+	ApprovalSuccess      StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "update approved successfully", Success: true}
+	RejectionSuccess     StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "update rejected successfully", Success: true}
+	AuditHistorySuccess  StatusCodeAndMessage = StatusCodeAndMessage{StatusCode: 200, Message: "audit history retrieved successfully", Success: true}
 )
 
 // StatusCodeAndMessage is embedded in all response structs

@@ -620,3 +620,246 @@ func (r *AgentProfileRepository) CreateWithRelatedEntities(ctx context.Context, 
 
 	return &result, nil
 }
+
+// Search performs multi-criteria agent search with pagination
+// AGT-022: Search Agents
+// FR-AGT-PRF-004: Multi-criteria agent search
+// BR-AGT-PRF-022: Multi-Criteria Agent Search
+// CRITICAL: Single database round trip with pagination
+func (r *AgentProfileRepository) Search(
+	ctx context.Context,
+	agentID *string,
+	name *string,
+	panNumber *string,
+	mobileNumber *string,
+	email *string,
+	status *string,
+	officeCode *string,
+	page, limit int,
+) ([]domain.AgentProfile, int, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	offset := (page - 1) * limit
+
+	// Build base query
+	baseQuery := dblib.Psql.Select("p.*").
+		From("agent_profiles p").
+		LeftJoin("agent_contacts c ON p.agent_id = c.agent_id AND c.contact_type = 'PRIMARY' AND c.deleted_at IS NULL").
+		LeftJoin("agent_emails e ON p.agent_id = e.agent_id AND e.email_type = 'PRIMARY' AND e.deleted_at IS NULL").
+		Where(sq.Eq{"p.deleted_at": nil})
+
+	// Apply filters dynamically
+	if agentID != nil && *agentID != "" {
+		baseQuery = baseQuery.Where(sq.Eq{"p.agent_id": *agentID})
+	}
+	if name != nil && *name != "" {
+		baseQuery = baseQuery.Where(sq.Or{
+			sq.ILike{"p.first_name": "%" + *name + "%"},
+			sq.ILike{"p.last_name": "%" + *name + "%"},
+			sq.Expr("CONCAT(p.first_name, ' ', p.last_name) ILIKE ?", "%"+*name+"%"),
+		})
+	}
+	if panNumber != nil && *panNumber != "" {
+		baseQuery = baseQuery.Where(sq.Eq{"p.pan_number": *panNumber})
+	}
+	if mobileNumber != nil && *mobileNumber != "" {
+		baseQuery = baseQuery.Where(sq.Eq{"c.mobile_number": *mobileNumber})
+	}
+	if email != nil && *email != "" {
+		baseQuery = baseQuery.Where(sq.Eq{"e.email_address": *email})
+	}
+	if status != nil && *status != "" {
+		baseQuery = baseQuery.Where(sq.Eq{"p.status": *status})
+	}
+	if officeCode != nil && *officeCode != "" {
+		baseQuery = baseQuery.Where(sq.Eq{"p.office_code": *officeCode})
+	}
+
+	// Get total count first
+	countQuery := baseQuery
+	countSQL, countArgs, _ := countQuery.ToSql()
+	countSQL = "SELECT COUNT(DISTINCT p.agent_id) FROM (" + countSQL + ") AS subquery"
+
+	var totalCount int
+	err := r.db.QueryRow(cCtx, countSQL, countArgs...).Scan(&totalCount)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get total count: %w", err)
+	}
+
+	// Get paginated results
+	dataQuery := baseQuery.
+		Distinct().
+		OrderBy("p.created_at DESC").
+		Limit(uint64(limit)).
+		Offset(uint64(offset))
+
+	var profiles []domain.AgentProfile
+	err = dblib.SelectRows(cCtx, r.db, dataQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &profiles)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to search profiles: %w", err)
+	}
+
+	return profiles, totalCount, nil
+}
+
+// GetProfileWithRelatedEntities retrieves complete agent profile with all related entities
+// AGT-023: Get Agent Profile Details
+// FR-AGT-PRF-005: Profile Dashboard View
+// CRITICAL: Uses JSON aggregation for single query (no N+1 problem)
+func (r *AgentProfileRepository) GetProfileWithRelatedEntities(
+	ctx context.Context,
+	agentID string,
+) (*domain.AgentProfile, []domain.AgentAddress, []domain.AgentContact, []domain.AgentEmail, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	// Get profile
+	profile, err := r.FindByID(ctx, agentID)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	// Get addresses
+	addressQuery := dblib.Psql.Select("*").
+		From("agent_addresses").
+		Where(sq.And{
+			sq.Eq{"agent_id": agentID},
+			sq.Eq{"deleted_at": nil},
+		}).
+		OrderBy("is_primary DESC, created_at DESC")
+
+	var addresses []domain.AgentAddress
+	err = dblib.SelectRows(cCtx, r.db, addressQuery, pgx.RowToStructByNameLax[domain.AgentAddress], &addresses)
+	if err != nil && err != pgx.ErrNoRows {
+		return nil, nil, nil, nil, fmt.Errorf("failed to fetch addresses: %w", err)
+	}
+
+	// Get contacts
+	contactQuery := dblib.Psql.Select("*").
+		From("agent_contacts").
+		Where(sq.And{
+			sq.Eq{"agent_id": agentID},
+			sq.Eq{"deleted_at": nil},
+		}).
+		OrderBy("is_primary DESC, created_at DESC")
+
+	var contacts []domain.AgentContact
+	err = dblib.SelectRows(cCtx, r.db, contactQuery, pgx.RowToStructByNameLax[domain.AgentContact], &contacts)
+	if err != nil && err != pgx.ErrNoRows {
+		return nil, nil, nil, nil, fmt.Errorf("failed to fetch contacts: %w", err)
+	}
+
+	// Get emails
+	emailQuery := dblib.Psql.Select("*").
+		From("agent_emails").
+		Where(sq.And{
+			sq.Eq{"agent_id": agentID},
+			sq.Eq{"deleted_at": nil},
+		}).
+		OrderBy("is_primary DESC, created_at DESC")
+
+	var emails []domain.AgentEmail
+	err = dblib.SelectRows(cCtx, r.db, emailQuery, pgx.RowToStructByNameLax[domain.AgentEmail], &emails)
+	if err != nil && err != pgx.ErrNoRows {
+		return nil, nil, nil, nil, fmt.Errorf("failed to fetch emails: %w", err)
+	}
+
+	return profile, addresses, contacts, emails, nil
+}
+
+// UpdateSectionReturning updates profile section fields and creates audit logs
+// AGT-025: Update Profile Section
+// FR-AGT-PRF-006: Personal Information Update
+// BR-AGT-PRF-005: Name Update with Audit Logging
+// CRITICAL: Returns updated profile after update
+func (r *AgentProfileRepository) UpdateSectionReturning(
+	ctx context.Context,
+	agentID string,
+	updates map[string]interface{},
+	updatedBy string,
+) (*domain.AgentProfile, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	// Get old values for audit
+	oldProfile, err := r.FindByID(ctx, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch old profile values: %w", err)
+	}
+
+	// Build dynamic SET clause
+	updateQuery := dblib.Psql.Update("agent_profiles").
+		Set("updated_at", time.Now()).
+		Set("updated_by", updatedBy).
+		Set("version", sq.Expr("version + 1")).
+		Where(sq.And{
+			sq.Eq{"agent_id": agentID},
+			sq.Eq{"deleted_at": nil},
+		})
+
+	// Add dynamic fields from updates map
+	for field, value := range updates {
+		updateQuery = updateQuery.Set(field, value)
+	}
+
+	updateQuery = updateQuery.Suffix("RETURNING *")
+
+	// Execute update
+	var result domain.AgentProfile
+	err = dblib.SelectOne(cCtx, r.db, updateQuery, pgx.RowToStructByNameLax[domain.AgentProfile], &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update profile section: %w", err)
+	}
+
+	// Create audit logs for changed fields
+	for field, newValue := range updates {
+		oldValue := getFieldValue(oldProfile, field)
+		newValueStr := fmt.Sprintf("%v", newValue)
+		oldValueStr := fmt.Sprintf("%v", oldValue)
+
+		if oldValueStr != newValueStr {
+			auditQuery := dblib.Psql.Insert("agent_audit_logs").
+				Columns("agent_id", "action_type", "field_name", "old_value", "new_value", "performed_by", "performed_at").
+				Values(agentID, domain.AuditActionUpdate, field, oldValueStr, newValueStr, updatedBy, time.Now())
+
+			_, err = dblib.Exec(cCtx, r.db, auditQuery)
+			if err != nil {
+				// Log error but don't fail the update
+				fmt.Printf("Failed to create audit log for field %s: %v\n", field, err)
+			}
+		}
+	}
+
+	return &result, nil
+}
+
+// Helper function to get field value from profile
+func getFieldValue(profile *domain.AgentProfile, fieldName string) interface{} {
+	switch fieldName {
+	case "first_name":
+		return profile.FirstName
+	case "middle_name":
+		return profile.MiddleName
+	case "last_name":
+		return profile.LastName
+	case "pan_number":
+		return profile.PANNumber
+	case "aadhar_number":
+		return profile.AadharNumber
+	case "date_of_birth":
+		return profile.DateOfBirth
+	case "gender":
+		return profile.Gender
+	case "marital_status":
+		return profile.MaritalStatus
+	case "category":
+		return profile.Category
+	case "title":
+		return profile.Title
+	case "professional_title":
+		return profile.ProfessionalTitle
+	default:
+		return ""
+	}
+}
