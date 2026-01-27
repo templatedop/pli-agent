@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -21,6 +22,7 @@ type AgentProfileUpdateHandler struct {
 	profileRepo       *repo.AgentProfileRepository
 	auditLogRepo      *repo.AgentAuditLogRepository
 	updateRequestRepo *repo.AgentProfileUpdateRequestRepository
+	fieldMetadataRepo *repo.AgentProfileFieldMetadataRepository
 }
 
 // NewAgentProfileUpdateHandler creates a new profile update handler
@@ -28,6 +30,7 @@ func NewAgentProfileUpdateHandler(
 	profileRepo *repo.AgentProfileRepository,
 	auditLogRepo *repo.AgentAuditLogRepository,
 	updateRequestRepo *repo.AgentProfileUpdateRequestRepository,
+	fieldMetadataRepo *repo.AgentProfileFieldMetadataRepository,
 ) *AgentProfileUpdateHandler {
 	base := serverHandler.New("Agent Profile Update & Search APIs").SetPrefix("/v1").AddPrefix("")
 	return &AgentProfileUpdateHandler{
@@ -35,6 +38,7 @@ func NewAgentProfileUpdateHandler(
 		profileRepo:       profileRepo,
 		auditLogRepo:      auditLogRepo,
 		updateRequestRepo: updateRequestRepo,
+		fieldMetadataRepo: fieldMetadataRepo,
 	}
 }
 
@@ -174,6 +178,7 @@ func (h *AgentProfileUpdateHandler) GetAgentProfile(sctx *serverRoute.Context, r
 
 // GetUpdateForm returns pre-populated update form with metadata
 // AGT-024: Get Update Form
+// Phase 6.2: Dynamic field metadata from database
 func (h *AgentProfileUpdateHandler) GetUpdateForm(sctx *serverRoute.Context, req AgentIDUri) (*resp.UpdateFormResponse, error) {
 	log.Info(sctx.Ctx, "Fetching update form for agent: %s", req.AgentID)
 
@@ -184,109 +189,103 @@ func (h *AgentProfileUpdateHandler) GetUpdateForm(sctx *serverRoute.Context, req
 		return nil, err
 	}
 
-	// Define sections
-	sections := []resp.SectionDTO{
-		{
-			Name:        "personal_info",
-			DisplayName: "Personal Information",
-			Fields:      []string{"first_name", "middle_name", "last_name", "date_of_birth", "gender", "marital_status", "category"},
-		},
-		{
-			Name:        "contact",
-			DisplayName: "Contact Information",
-			Fields:      []string{"mobile_number", "alternate_number", "email_address"},
-		},
+	// Fetch all active field metadata from database
+	allFieldMetadata, err := h.fieldMetadataRepo.GetAll(sctx.Ctx)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error fetching field metadata: %v", err)
+		return nil, err
 	}
 
-	// Define field metadata (which fields require approval)
-	editableFields := map[string]resp.FieldMetadata{
-		"first_name": {
-			Name:             "first_name",
-			DisplayName:      "First Name",
-			Type:             "text",
-			Required:         true,
-			Editable:         true,
-			RequiresApproval: true, // Critical field
-			ValidationRules:  []string{"required", "min:2", "max:50"},
-		},
-		"middle_name": {
-			Name:             "middle_name",
-			DisplayName:      "Middle Name",
-			Type:             "text",
-			Required:         false,
-			Editable:         true,
-			RequiresApproval: true, // Critical field
-			ValidationRules:  []string{"max:50"},
-		},
-		"last_name": {
-			Name:             "last_name",
-			DisplayName:      "Last Name",
-			Type:             "text",
-			Required:         true,
-			Editable:         true,
-			RequiresApproval: true, // Critical field
-			ValidationRules:  []string{"required", "min:2", "max:50"},
-		},
-		"pan_number": {
-			Name:             "pan_number",
-			DisplayName:      "PAN Number",
-			Type:             "text",
-			Required:         true,
-			Editable:         true,
-			RequiresApproval: true, // Critical field
-			ValidationRules:  []string{"required", "len:10", "uppercase"},
-		},
-		"aadhar_number": {
-			Name:             "aadhar_number",
-			DisplayName:      "Aadhar Number",
-			Type:             "text",
-			Required:         true,
-			Editable:         true,
-			RequiresApproval: true, // Critical field
-			ValidationRules:  []string{"required", "len:12", "numeric"},
-		},
-		"date_of_birth": {
-			Name:             "date_of_birth",
-			DisplayName:      "Date of Birth",
-			Type:             "date",
-			Required:         true,
-			Editable:         true,
-			RequiresApproval: false, // Non-critical
-		},
-		"gender": {
-			Name:             "gender",
-			DisplayName:      "Gender",
-			Type:             "select",
-			Required:         true,
-			Editable:         true,
-			RequiresApproval: false, // Non-critical
-			ValidationRules:  []string{"oneof:MALE FEMALE OTHER"},
-		},
-		"marital_status": {
-			Name:             "marital_status",
-			DisplayName:      "Marital Status",
-			Type:             "select",
-			Required:         false,
-			Editable:         true,
-			RequiresApproval: false, // Non-critical
-			ValidationRules:  []string{"oneof:MARRIED UNMARRIED DIVORCED WIDOWED"},
-		},
+	// Group fields by section and build response structures
+	sectionFieldsMap := make(map[string][]string)
+	editableFields := make(map[string]resp.FieldMetadata)
+
+	for _, fieldMeta := range allFieldMetadata {
+		// Add field to section
+		sectionFieldsMap[fieldMeta.Section] = append(sectionFieldsMap[fieldMeta.Section], fieldMeta.FieldName)
+
+		// Parse validation rules from JSONB
+		var validationRules map[string]interface{}
+		if fieldMeta.ValidationRules.Valid && fieldMeta.ValidationRules.String != "" {
+			if err := json.Unmarshal([]byte(fieldMeta.ValidationRules.String), &validationRules); err != nil {
+				log.Warn(sctx.Ctx, "Failed to parse validation rules for field %s: %v", fieldMeta.FieldName, err)
+				validationRules = make(map[string]interface{})
+			}
+		}
+
+		// Parse select options from JSONB
+		var selectOptions []map[string]interface{}
+		if fieldMeta.SelectOptions.Valid && fieldMeta.SelectOptions.String != "" {
+			if err := json.Unmarshal([]byte(fieldMeta.SelectOptions.String), &selectOptions); err != nil {
+				log.Warn(sctx.Ctx, "Failed to parse select options for field %s: %v", fieldMeta.FieldName, err)
+			}
+		}
+
+		// Build field metadata response
+		fieldMetaResp := resp.FieldMetadata{
+			Name:             fieldMeta.FieldName,
+			DisplayName:      fieldMeta.DisplayName,
+			Type:             fieldMeta.FieldType,
+			Required:         fieldMeta.IsRequired,
+			Editable:         fieldMeta.IsEditable,
+			RequiresApproval: fieldMeta.RequiresApproval,
+			ValidationRules:  validationRules,
+			SelectOptions:    selectOptions,
+		}
+
+		// Add optional fields
+		if fieldMeta.Placeholder.Valid {
+			fieldMetaResp.Placeholder = fieldMeta.Placeholder.String
+		}
+		if fieldMeta.HelpText.Valid {
+			fieldMetaResp.HelpText = fieldMeta.HelpText.String
+		}
+
+		editableFields[fieldMeta.FieldName] = fieldMetaResp
 	}
 
-	// Build current data map
+	// Build sections with display names
+	sectionDisplayNames := map[string]string{
+		"personal_info": "Personal Information",
+		"address":       "Address Information",
+		"contact":       "Contact Information",
+		"email":         "Email Information",
+		"bank":          "Bank Details",
+		"license":       "License Information",
+	}
+
+	sections := make([]resp.SectionDTO, 0)
+	for section, fields := range sectionFieldsMap {
+		displayName := sectionDisplayNames[section]
+		if displayName == "" {
+			displayName = section
+		}
+		sections = append(sections, resp.SectionDTO{
+			Name:        section,
+			DisplayName: displayName,
+			Fields:      fields,
+		})
+	}
+
+	// Build current data map dynamically from profile
 	currentData := map[string]interface{}{
-		"first_name":     profile.FirstName,
-		"middle_name":    profile.MiddleName,
-		"last_name":      profile.LastName,
-		"pan_number":     profile.PANNumber,
-		"aadhar_number":  profile.AadharNumber,
-		"date_of_birth":  profile.DateOfBirth,
-		"gender":         profile.Gender,
-		"marital_status": profile.MaritalStatus,
-		"category":       profile.Category,
+		// Personal info
+		"title":              profile.Title,
+		"first_name":         profile.FirstName,
+		"middle_name":        profile.MiddleName,
+		"last_name":          profile.LastName,
+		"date_of_birth":      profile.DateOfBirth,
+		"gender":             profile.Gender,
+		"marital_status":     profile.MaritalStatus,
+		"category":           profile.Category,
+		"pan_number":         profile.PANNumber,
+		"aadhar_number":      profile.AadharNumber,
+		"professional_title": profile.ProfessionalTitle,
+		// TODO: Add other sections (address, contact, email, bank) when needed
 	}
 
-	log.Info(sctx.Ctx, "Update form fetched successfully for agent: %s", req.AgentID)
+	log.Info(sctx.Ctx, "Update form fetched successfully for agent: %s with %d fields across %d sections",
+		req.AgentID, len(editableFields), len(sections))
 
 	return &resp.UpdateFormResponse{
 		StatusCodeAndMessage: port.FormFetchSuccess,
@@ -301,18 +300,24 @@ func (h *AgentProfileUpdateHandler) GetUpdateForm(sctx *serverRoute.Context, req
 // AGT-025: Update Profile Section
 // FR-AGT-PRF-006: Personal Information Update
 // BR-AGT-PRF-005: Name Update with Audit Logging
+// Phase 6.2: Dynamic approval logic based on field metadata
 func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Context, req UpdateSectionRequest) (*resp.UpdateSectionResponse, error) {
 	log.Info(sctx.Ctx, "Updating section %s for agent: %s", req.Section, req.AgentID)
 
-	// Check if any critical fields are being updated
-	criticalFields := map[string]bool{
-		"first_name":    true,
-		"middle_name":   true,
-		"last_name":     true,
-		"pan_number":    true,
-		"aadhar_number": true,
+	// Fetch critical fields from database (fields that require approval)
+	criticalFieldsMetadata, err := h.fieldMetadataRepo.GetCriticalFields(sctx.Ctx)
+	if err != nil {
+		log.Error(sctx.Ctx, "Error fetching critical fields metadata: %v", err)
+		return nil, err
 	}
 
+	// Build map of critical fields for quick lookup
+	criticalFields := make(map[string]bool)
+	for _, fieldMeta := range criticalFieldsMetadata {
+		criticalFields[fieldMeta.FieldName] = true
+	}
+
+	// Check if any critical fields are being updated
 	requiresApproval := false
 	for field := range req.Updates {
 		if criticalFields[field] {
@@ -417,31 +422,19 @@ func (h *AgentProfileUpdateHandler) UpdateProfileSection(sctx *serverRoute.Conte
 // AGT-026: Approve Profile Update
 // BR-AGT-PRF-005: Name Update with Audit Logging
 // BR-AGT-PRF-006: PAN Update with Validation
-// OPTIMIZED: 2 database calls (approve+getUpdates in 1, apply updates in 1)
+// ULTIMATE OPTIMIZATION: 1 database call (stored function does everything)
 func (h *AgentProfileUpdateHandler) ApproveProfileUpdate(sctx *serverRoute.Context, req ApprovalRequest) (*resp.ApprovalResponse, error) {
 	log.Info(sctx.Ctx, "Approving profile update request: %s", req.ApprovalRequestID)
 
-	// Approve request and get field updates in SINGLE database call
-	approvedRequest, fieldUpdates, err := h.updateRequestRepo.ApproveAndApplyUpdates(
+	// Single database call: approve + update + audit logs
+	updatedProfile, approvedRequest, err := h.profileRepo.ApproveRequestAndUpdateProfile(
 		sctx.Ctx,
 		req.ApprovalRequestID,
 		req.ApprovedBy,
 		req.Comments,
 	)
 	if err != nil {
-		log.Error(sctx.Ctx, "Error approving request: %v", err)
-		return nil, err
-	}
-
-	// Apply the updates to profile (single CTE with audit logs)
-	updatedProfile, err := h.profileRepo.UpdateSectionReturning(
-		sctx.Ctx,
-		approvedRequest.AgentID,
-		fieldUpdates,
-		req.ApprovedBy,
-	)
-	if err != nil {
-		log.Error(sctx.Ctx, "Error applying profile updates: %v", err)
+		log.Error(sctx.Ctx, "Error approving and applying updates: %v", err)
 		return nil, err
 	}
 
@@ -454,7 +447,7 @@ func (h *AgentProfileUpdateHandler) ApproveProfileUpdate(sctx *serverRoute.Conte
 		AgentID:              approvedRequest.AgentID,
 		ApprovedBy:           req.ApprovedBy,
 		ProcessedAt:          time.Now(),
-		Message:              fmt.Sprintf("Profile update approved and applied successfully. Updated %d fields.", len(fieldUpdates)),
+		Message:              "Profile update approved and applied successfully",
 		UpdatedProfile: &resp.AgentProfileDTO{
 			AgentID:     updatedProfile.AgentID,
 			ProfileType: updatedProfile.AgentType,

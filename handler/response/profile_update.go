@@ -144,13 +144,16 @@ type SectionDTO struct {
 
 // FieldMetadata contains field editing metadata
 type FieldMetadata struct {
-	Name             string   `json:"name"`
-	DisplayName      string   `json:"display_name"`
-	Type             string   `json:"type"`
-	Required         bool     `json:"required"`
-	Editable         bool     `json:"editable"`
-	RequiresApproval bool     `json:"requires_approval"`
-	ValidationRules  []string `json:"validation_rules,omitempty"`
+	Name             string                   `json:"name"`
+	DisplayName      string                   `json:"display_name"`
+	Type             string                   `json:"type"`
+	Required         bool                     `json:"required"`
+	Editable         bool                     `json:"editable"`
+	RequiresApproval bool                     `json:"requires_approval"`
+	ValidationRules  map[string]interface{}   `json:"validation_rules,omitempty"`
+	SelectOptions    []map[string]interface{} `json:"select_options,omitempty"`
+	Placeholder      string                   `json:"placeholder,omitempty"`
+	HelpText         string                   `json:"help_text,omitempty"`
 }
 
 // UpdateSectionResponse returns update result

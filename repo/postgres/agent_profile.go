@@ -899,6 +899,45 @@ func (r *AgentProfileRepository) UpdateSectionReturning(
 	return &result, nil
 }
 
+// ApproveRequestAndUpdateProfile approves update request AND applies profile changes in SINGLE database round trip
+// AGT-026: Approve Profile Update - Ultimate optimization
+// Uses PostgreSQL stored function: approve_request_and_update_profile()
+// Single function call replaces 2 separate operations (approve + update)
+func (r *AgentProfileRepository) ApproveRequestAndUpdateProfile(
+	ctx context.Context,
+	requestID string,
+	approvedBy string,
+	comments string,
+) (*domain.AgentProfile, *domain.AgentProfileUpdateRequest, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutHigh"))
+	defer cancel()
+
+	// Call stored function - single database hit
+	sql := `SELECT * FROM approve_request_and_update_profile($1, $2, $3)`
+
+	var profileJSON, requestJSON []byte
+	err := r.db.QueryRow(cCtx, sql, requestID, approvedBy, comments).Scan(&profileJSON, &requestJSON)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to approve and update in single call: %w", err)
+	}
+
+	// Parse profile JSON
+	var profile domain.AgentProfile
+	err = json.Unmarshal(profileJSON, &profile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse updated profile: %w", err)
+	}
+
+	// Parse request JSON
+	var request domain.AgentProfileUpdateRequest
+	err = json.Unmarshal(requestJSON, &request)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse approved request: %w", err)
+	}
+
+	return &profile, &request, nil
+}
+
 // Helper function to get field value from profile
 func getFieldValue(profile *domain.AgentProfile, fieldName string) interface{} {
 	switch fieldName {

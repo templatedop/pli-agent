@@ -27,8 +27,9 @@ var FxRepo = fx.Module(
 		repo.NewAgentBankDetailsRepository,
 		repo.NewAgentLicenseRepository,
 		repo.NewAgentAuditLogRepository,
-		repo.NewAgentProfileSessionRepository,       // Phase 5: Session management
-		repo.NewAgentProfileUpdateRequestRepository, // Phase 6.1: Approval workflow
+		repo.NewAgentProfileSessionRepository,         // Phase 5: Session management
+		repo.NewAgentProfileUpdateRequestRepository,   // Phase 6.1: Approval workflow
+		repo.NewAgentProfileFieldMetadataRepository,   // Phase 6.2: Dynamic field metadata
 		// Add more repository constructors here as needed
 	),
 )
