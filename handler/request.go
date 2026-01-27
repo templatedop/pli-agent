@@ -1,6 +1,9 @@
 package handler
 
-import "database/sql"
+import (
+	"database/sql"
+	"time"
+)
 
 // ========================================================================
 // VALIDATION API REQUESTS (AGT-012 to AGT-015)
@@ -176,4 +179,35 @@ type AuditHistoryRequest struct {
 	ToDate   *string `query:"to_date"`
 	Page     int     `query:"page" validate:"omitempty,min=1" default:"1"`
 	Limit    int     `query:"limit" validate:"omitempty,min=1,max=100" default:"50"`
+}
+
+// GetAuditHistoryRequest retrieves audit history with filters (Phase 9)
+// AGT-028: Get Audit History
+type GetAuditHistoryRequest struct {
+	FromDate *time.Time `query:"from_date"`
+	ToDate   *time.Time `query:"to_date"`
+	Page     *int       `query:"page"`
+	Limit    *int       `query:"limit"`
+}
+
+// GetTimelineRequest retrieves agent activity timeline
+// AGT-076: Agent Activity Timeline
+// Phase 9: Search & Dashboard APIs
+type GetTimelineRequest struct {
+	ActivityType *string    `query:"activity_type"` // PROFILE_CHANGE, LICENSE_UPDATE, STATUS_CHANGE
+	FromDate     *time.Time `query:"from_date"`
+	ToDate       *time.Time `query:"to_date"`
+	Page         *int       `query:"page"`
+	Limit        *int       `query:"limit"`
+}
+
+// GetNotificationsRequest retrieves agent notification history
+// AGT-077: Agent Notification History
+// Phase 9: Search & Dashboard APIs
+type GetNotificationsRequest struct {
+	NotificationType *string    `query:"notification_type"` // EMAIL, SMS, INTERNAL
+	FromDate         *time.Time `query:"from_date"`
+	ToDate           *time.Time `query:"to_date"`
+	Page             *int       `query:"page"`
+	Limit            *int       `query:"limit"`
 }

@@ -938,6 +938,57 @@ func (r *AgentProfileRepository) ApproveRequestAndUpdateProfile(
 	return &profile, &request, nil
 }
 
+// GetHierarchy retrieves agent hierarchy chain using recursive CTE
+// AGT-073: Get Agent Hierarchy
+// Phase 9: Search & Dashboard APIs
+// OPTIMIZED: Single recursive query traverses entire hierarchy chain
+func (r *AgentProfileRepository) GetHierarchy(ctx context.Context, agentID string) ([]domain.HierarchyNode, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutLow"))
+	defer cancel()
+
+	// Recursive CTE to build hierarchy chain
+	// Starts with given agent, follows advisor_coordinator_id links upward
+	sql := `
+		WITH RECURSIVE hierarchy AS (
+			-- Base case: Start with the given agent
+			SELECT
+				agent_id,
+				agent_code,
+				CONCAT(first_name, ' ', COALESCE(middle_name || ' ', ''), last_name) AS name,
+				agent_type,
+				advisor_coordinator_id,
+				1 AS level
+			FROM agent_profiles
+			WHERE agent_id = $1 AND deleted_at IS NULL
+
+			UNION ALL
+
+			-- Recursive case: Get coordinator/manager above
+			SELECT
+				p.agent_id,
+				p.agent_code,
+				CONCAT(p.first_name, ' ', COALESCE(p.middle_name || ' ', ''), p.last_name) AS name,
+				p.agent_type,
+				p.advisor_coordinator_id,
+				h.level + 1 AS level
+			FROM agent_profiles p
+			INNER JOIN hierarchy h ON p.agent_id = h.advisor_coordinator_id
+			WHERE p.deleted_at IS NULL
+		)
+		SELECT agent_id, agent_code, name, agent_type, level
+		FROM hierarchy
+		ORDER BY level ASC
+	`
+
+	var hierarchy []domain.HierarchyNode
+	err := r.db.Select(cCtx, &hierarchy, sql, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get hierarchy: %w", err)
+	}
+
+	return hierarchy, nil
+}
+
 // Helper function to get field value from profile
 func getFieldValue(profile *domain.AgentProfile, fieldName string) interface{} {
 	switch fieldName {

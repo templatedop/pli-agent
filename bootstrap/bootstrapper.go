@@ -31,6 +31,7 @@ var FxRepo = fx.Module(
 		repo.NewAgentProfileUpdateRequestRepository, // Phase 6.1: Approval workflow
 		repo.NewAgentProfileFieldMetadataRepository, // Phase 6.2: Dynamic field metadata
 		repo.NewAgentTerminationRepository,          // Phase 8: Status management
+		repo.NewAgentNotificationRepository,         // Phase 9: Notification history
 		// Add more repository constructors here as needed
 	),
 )
@@ -87,7 +88,13 @@ var FxHandler = fx.Module(
 			fx.As(new(serverHandler.Handler)),
 			fx.ResultTags(serverHandler.ServerControllersGroupTag),
 		),
-		// TODO: PHASE 9 - Add search and dashboard handlers
+		// PHASE 9: Search & Dashboard APIs (AGT-022, AGT-023, AGT-028, AGT-068, AGT-073, AGT-076, AGT-077)
+		// Agent Search & Dashboard Handler with multi-criteria search, hierarchy, timeline, notifications
+		fx.Annotate(
+			handler.NewAgentSearchDashboardHandler,
+			fx.As(new(serverHandler.Handler)),
+			fx.ResultTags(serverHandler.ServerControllersGroupTag),
+		),
 		// TODO: PHASE 10 - Add batch and webhook handlers
 	),
 )

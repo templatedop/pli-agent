@@ -497,3 +497,145 @@ func (r *AgentAuditLogRepository) GetHistory(
 
 	return auditLogs, totalCount, nil
 }
+
+// GetTimeline retrieves agent activity timeline combining audit logs, license changes, and status changes
+// AGT-076: Agent Activity Timeline
+// Phase 9: Search & Dashboard APIs
+// CRITICAL: Single query using UNION to combine different event sources
+func (r *AgentAuditLogRepository) GetTimeline(
+	ctx context.Context,
+	agentID string,
+	activityType *string,
+	fromDate, toDate *time.Time,
+	page, limit int,
+) ([]domain.TimelineEvent, int, error) {
+	cCtx, cancel := context.WithTimeout(ctx, r.cfg.GetDuration("db.QueryTimeoutMed"))
+	defer cancel()
+
+	offset := (page - 1) * limit
+
+	// Build timeline query combining multiple event sources
+	// UNION ALL combines audit logs + license changes + status changes
+	timelineSQL := `
+		WITH timeline_events AS (
+			-- Audit log events
+			SELECT
+				performed_at AS timestamp,
+				'PROFILE_CHANGE' AS event_type,
+				CASE
+					WHEN field_name IS NOT NULL THEN
+						CONCAT('Updated ', field_name, ' from "', COALESCE(old_value, 'NULL'), '" to "', COALESCE(new_value, 'NULL'), '"')
+					ELSE
+						action_type
+				END AS description,
+				performed_by,
+				field_name,
+				old_value,
+				new_value,
+				action_reason
+			FROM agent_audit_logs
+			WHERE agent_id = $1
+				AND ($4::text IS NULL OR 'PROFILE_CHANGE' = $4)
+				AND ($5::timestamptz IS NULL OR performed_at >= $5)
+				AND ($6::timestamptz IS NULL OR performed_at <= $6)
+
+			UNION ALL
+
+			-- License events
+			SELECT
+				updated_at AS timestamp,
+				'LICENSE_UPDATE' AS event_type,
+				CONCAT('License ', license_type, ' updated - Status: ', status) AS description,
+				NULL AS performed_by,
+				NULL AS field_name,
+				NULL AS old_value,
+				NULL AS new_value,
+				NULL AS action_reason
+			FROM agent_licenses
+			WHERE agent_id = $1
+				AND ($4::text IS NULL OR 'LICENSE_UPDATE' = $4)
+				AND ($5::timestamptz IS NULL OR updated_at >= $5)
+				AND ($6::timestamptz IS NULL OR updated_at <= $6)
+
+			UNION ALL
+
+			-- Status change events (from audit logs)
+			SELECT
+				performed_at AS timestamp,
+				'STATUS_CHANGE' AS event_type,
+				CONCAT('Status changed from ', COALESCE(old_value, 'NULL'), ' to ', COALESCE(new_value, 'NULL')) AS description,
+				performed_by,
+				NULL AS field_name,
+				old_value,
+				new_value,
+				action_reason
+			FROM agent_audit_logs
+			WHERE agent_id = $1
+				AND action_type = 'STATUS_CHANGE'
+				AND ($4::text IS NULL OR 'STATUS_CHANGE' = $4)
+				AND ($5::timestamptz IS NULL OR performed_at >= $5)
+				AND ($6::timestamptz IS NULL OR performed_at <= $6)
+		)
+		SELECT * FROM timeline_events
+		ORDER BY timestamp DESC
+		LIMIT $2 OFFSET $3
+	`
+
+	// Count query for total results
+	countSQL := `
+		WITH timeline_events AS (
+			-- Same UNION logic for counting
+			SELECT performed_at AS timestamp
+			FROM agent_audit_logs
+			WHERE agent_id = $1
+				AND ($2::text IS NULL OR 'PROFILE_CHANGE' = $2)
+				AND ($3::timestamptz IS NULL OR performed_at >= $3)
+				AND ($4::timestamptz IS NULL OR performed_at <= $4)
+
+			UNION ALL
+
+			SELECT updated_at AS timestamp
+			FROM agent_licenses
+			WHERE agent_id = $1
+				AND ($2::text IS NULL OR 'LICENSE_UPDATE' = $2)
+				AND ($3::timestamptz IS NULL OR updated_at >= $3)
+				AND ($4::timestamptz IS NULL OR updated_at <= $4)
+
+			UNION ALL
+
+			SELECT performed_at AS timestamp
+			FROM agent_audit_logs
+			WHERE agent_id = $1
+				AND action_type = 'STATUS_CHANGE'
+				AND ($2::text IS NULL OR 'STATUS_CHANGE' = $2)
+				AND ($3::timestamptz IS NULL OR performed_at >= $3)
+				AND ($4::timestamptz IS NULL OR performed_at <= $4)
+		)
+		SELECT COUNT(*) FROM timeline_events
+	`
+
+	// Use batch for single database round trip
+	batch := &pgx.Batch{}
+
+	// Query 1: Count total events
+	var totalCount int
+	err := dbutil.QueueReturnRowRaw(batch, countSQL, []interface{}{agentID, activityType, fromDate, toDate}, pgx.RowTo[int], &totalCount)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to queue count query: %w", err)
+	}
+
+	// Query 2: Get paginated timeline events
+	var events []domain.TimelineEvent
+	err = dbutil.QueueReturnRowsRaw(batch, timelineSQL, []interface{}{agentID, limit, offset, activityType, fromDate, toDate}, pgx.RowToStructByNameLax[domain.TimelineEvent], &events)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to queue timeline query: %w", err)
+	}
+
+	// Execute batch in single round trip
+	err = r.db.SendBatch(cCtx, batch).Close()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to execute timeline batch: %w", err)
+	}
+
+	return events, totalCount, nil
+}
