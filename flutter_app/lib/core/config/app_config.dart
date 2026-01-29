@@ -1,32 +1,27 @@
+/// Application Configuration
+/// For API-specific config, see api_config.dart
+import 'api_config.dart';
+
 class AppConfig {
-  // Environment
-  static const String environment = String.fromEnvironment(
-    'ENVIRONMENT',
-    defaultValue: 'development',
-  );
+  // ============================================================================
+  // API CONFIGURATION (Delegated to ApiConfig)
+  // See api_config.dart for base URLs, timeouts, and API settings
+  // ============================================================================
 
-  // API Base URLs
-  static const String productionBaseUrl = 'https://api.postallifeinsurance.gov.in/v1';
-  static const String stagingBaseUrl = 'https://staging-api.postallifeinsurance.gov.in/v1';
-  static const String developmentBaseUrl = 'http://localhost:8080/api/v1';
+  /// Get current base URL (delegates to ApiConfig)
+  static String get baseUrl => ApiConfig.baseUrl;
 
-  // Get current base URL based on environment
-  static String get baseUrl {
-    switch (environment) {
-      case 'production':
-        return productionBaseUrl;
-      case 'staging':
-        return stagingBaseUrl;
-      case 'development':
-      default:
-        return developmentBaseUrl;
-    }
-  }
+  /// Get current environment (delegates to ApiConfig)
+  static String get environment => ApiConfig.environment;
 
-  // API Timeouts
-  static const Duration connectTimeout = Duration(seconds: 30);
-  static const Duration receiveTimeout = Duration(seconds: 30);
-  static const Duration sendTimeout = Duration(seconds: 30);
+  /// Get API connect timeout
+  static Duration get connectTimeout => ApiConfig.connectTimeout;
+
+  /// Get API receive timeout
+  static Duration get receiveTimeout => ApiConfig.receiveTimeout;
+
+  /// Get API send timeout
+  static Duration get sendTimeout => ApiConfig.sendTimeout;
 
   // Storage Keys
   static const String cachedAgentTypesKey = 'CACHED_AGENT_TYPES';

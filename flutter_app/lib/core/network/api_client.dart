@@ -1,7 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:pretty_dio_logger/pretty_dio_logger.dart';
 
-import '../config/app_config.dart';
+import '../config/api_config.dart';
 import '../errors/exceptions.dart';
 
 class ApiClient {
@@ -10,22 +10,19 @@ class ApiClient {
   ApiClient() {
     _dio = Dio(
       BaseOptions(
-        baseUrl: AppConfig.baseUrl,
-        connectTimeout: AppConfig.connectTimeout,
-        receiveTimeout: AppConfig.receiveTimeout,
-        sendTimeout: AppConfig.sendTimeout,
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
+        baseUrl: ApiConfig.baseUrl,
+        connectTimeout: ApiConfig.connectTimeout,
+        receiveTimeout: ApiConfig.receiveTimeout,
+        sendTimeout: ApiConfig.sendTimeout,
+        headers: ApiConfig.defaultHeaders,
       ),
     );
 
     // Add interceptors
     _dio.interceptors.add(_errorInterceptor());
 
-    // Add logger in development mode
-    if (AppConfig.environment == 'development') {
+    // Add logger if enabled
+    if (ApiConfig.shouldEnableLogging) {
       _dio.interceptors.add(
         PrettyDioLogger(
           requestHeader: true,
