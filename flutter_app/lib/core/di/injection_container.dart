@@ -32,6 +32,7 @@ import '../../domain/usecases/create_agent_profile_usecase.dart';
 import '../../domain/usecases/get_agent_profile_usecase.dart';
 import '../../domain/usecases/search_agents_usecase.dart';
 import '../../domain/usecases/update_agent_profile_usecase.dart';
+import '../../presentation/bloc/agent_profile/agent_profile_bloc.dart';
 import '../config/api_config.dart';
 import '../network/api_client.dart';
 
@@ -102,15 +103,15 @@ Future<void> initializeDependencies() async {
   // PRESENTATION LAYER (BLoCs/Cubits)
   // ==========================================================================
 
-  // BLoCs will be registered here as we create them
-  // Example:
-  // sl.registerFactory(
-  //   () => AgentProfileBloc(
-  //     getAgentProfileUseCase: sl(),
-  //     createAgentProfileUseCase: sl(),
-  //     updateAgentProfileUseCase: sl(),
-  //   ),
-  // );
+  // Agent Profile BLoC (Factory - new instance per screen)
+  sl.registerFactory(
+    () => AgentProfileBloc(
+      getAgentProfileUseCase: sl(),
+      searchAgentsUseCase: sl(),
+      createAgentProfileUseCase: sl(),
+      updateAgentProfileUseCase: sl(),
+    ),
+  );
 }
 
 /// Reset all dependencies (useful for testing)
