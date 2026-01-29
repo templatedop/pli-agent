@@ -3,9 +3,9 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
 import 'core/config/app_config.dart';
+import 'core/di/injection_container.dart' as di;
 import 'core/theme/app_theme.dart';
-import 'injection_container.dart' as di;
-import 'presentation/routes/app_router.dart';
+import 'presentation/screens/home_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,7 +14,7 @@ void main() async {
   await Hive.initFlutter();
 
   // Initialize dependency injection
-  await di.init();
+  await di.initializeDependencies();
 
   runApp(const PLIAgentManagementApp());
 }
@@ -24,15 +24,13 @@ class PLIAgentManagementApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final appRouter = di.sl<AppRouter>();
-
-    return MaterialApp.router(
+    return MaterialApp(
       title: 'PLI Agent Management',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
       themeMode: ThemeMode.light,
-      routerConfig: appRouter.router,
+      home: const HomeScreen(),
     );
   }
 }
