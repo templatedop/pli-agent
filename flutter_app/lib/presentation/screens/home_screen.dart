@@ -5,6 +5,8 @@
 
 import 'package:flutter/material.dart';
 import '../../core/theme/app_colors.dart';
+import '../widgets/common/custom_button.dart';
+import 'agent/agent_search_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -98,6 +100,39 @@ class HomeScreen extends StatelessWidget {
                 status: 'In Progress',
                 icon: Icons.hourglass_empty,
                 color: AppColors.warning,
+              ),
+
+              const SizedBox(height: 48),
+
+              // Action buttons
+              CustomButton(
+                text: 'Search Agents',
+                icon: Icons.search,
+                onPressed: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const AgentSearchScreen(),
+                    ),
+                  );
+                },
+                width: double.infinity,
+              ),
+
+              const SizedBox(height: 16),
+
+              CustomButton(
+                text: 'Create Agent Profile',
+                icon: Icons.person_add,
+                onPressed: () {
+                  // TODO: Navigate to create agent screen
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Agent creation screen coming soon!'),
+                    ),
+                  );
+                },
+                type: ButtonType.secondary,
+                width: double.infinity,
               ),
 
               const SizedBox(height: 48),
