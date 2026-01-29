@@ -1,0 +1,75 @@
+openapi: 3.0.3
+info:
+  title: Agent Profile Management API - Complete
+  version: 1.0.0
+  description: |
+    **Complete Agent Profile Management API - All 78 Endpoints**
+
+    This merged specification includes:
+    - Part 1: Profile Creation, Lookup, Validation APIs (24 endpoints)
+    - Part 2: Profile Update, License, Termination, Auth APIs (24 endpoints)
+    - Part 3: Self-Service, Bank Details, Goals, Export APIs (30 endpoints)
+
+    **Total**: 78 unique APIs across 10 user journeys
+  contact:
+    name: API Support
+    email: api-support@postal-life-insurance.gov.in
+
+servers:
+  - url: https://api.postallifeinsurance.gov.in/v1
+    description: Production Server
+  - url: https://staging-api.postallifeinsurance.gov.in/v1
+    description: Staging Server
+  - url: http://localhost:8080/api/v1
+    description: Local Development Server
+
+security: []  # No authentication required currently
+
+tags:
+  - name: Profile Management
+    description: Agent profile creation and management
+  - name: Search & Lookup
+    description: Agent search and dropdown data
+  - name: Validation
+    description: PAN, IFSC, HRMS validation
+  - name: Workflow
+    description: Session management
+  - name: Status Management
+    description: Agent status tracking
+  - name: Notifications
+    description: Notification management
+  - name: License Management
+    description: License management and renewal
+  - name: Authentication
+    description: Portal authentication
+  - name: Approval
+    description: Approval workflows
+  - name: Audit & Timeline
+    description: Audit history and timeline
+  - name: Bank Details
+    description: Bank account management
+  - name: Goals & Performance
+    description: Goal setting and tracking
+  - name: Export
+    description: Data export functionality
+  - name: Product Authorization
+    description: Product authorization management
+  - name: Dashboard
+    description: Dashboard APIs
+  - name: Document
+    description: Document generation and download
+  - name: Webhooks
+    description: Webhook endpoints
+
+# This is a reference file that points to the 3 original YAML files
+# For actual API client generation, we'll use all 3 files combined
+# The paths below reference endpoints from all 3 parts
+
+paths:
+  # Import all paths from part 1
+  $ref: '../agents/agent_profile_management_api_part1.yaml#/paths'
+
+components:
+  # Import all components from all parts
+  schemas:
+    $ref: '../agents/agent_profile_management_api_part1.yaml#/components/schemas'
